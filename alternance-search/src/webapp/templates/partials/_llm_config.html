@@ -1,0 +1,47 @@
+<!-- partials/_llm_config.html — configuration du LLM -->
+<section class="card card-llm">
+    <h2 class="card-title">
+        <i class="fa-solid fa-robot"></i> LLM Configuration
+    </h2>
+
+    <div style="padding: 18px; display: flex; flex-direction: column; gap: 12px;">
+
+        <!-- Provider -->
+        <label class="field-label" for="llm-provider">Provider</label>
+        <select id="llm-provider" class="input">
+            <option value="ollama">Ollama (local)</option>
+            <option value="picoclaw">Picoclaw (local)</option>
+            <option value="openai">OpenAI (cloud)</option>
+            <option value="anthropic">Anthropic (cloud)</option>
+            <option value="custom">Custom</option>
+        </select>
+
+        <!-- Model -->
+        <label class="field-label" for="llm-model">Model</label>
+        <input id="llm-model" type="text" class="input" placeholder="qwen2.5:7b">
+
+        <!-- Base URL -->
+        <label class="field-label" for="llm-base-url">Base URL</label>
+        <input id="llm-base-url" type="text" class="input" placeholder="http://localhost:11434/v1">
+
+        <!-- API Key (visible only if provider needs one) -->
+        <div id="llm-key-group" style="display:none;">
+            <label class="field-label" for="llm-api-key">API Key</label>
+            <input id="llm-api-key" type="password" class="input" placeholder="sk-...">
+            <span id="llm-key-preview" style="font-size:11px;color:var(--color-text-muted);margin-top:2px;"></span>
+        </div>
+
+        <!-- Buttons -->
+        <div style="display:flex; gap:8px; margin-top:4px;">
+            <button id="btn-test-llm" class="btn btn-outline btn-sm" style="flex:1;">
+                <i class="fa-solid fa-plug"></i> Test
+            </button>
+            <button id="btn-save-llm" class="btn btn-primary btn-sm" style="flex:1;">
+                <i class="fa-solid fa-floppy-disk"></i> Save
+            </button>
+        </div>
+
+        <!-- Status -->
+        <div id="llm-status" class="llm-status-bar" style="display:none;"></div>
+    </div>
+</section>

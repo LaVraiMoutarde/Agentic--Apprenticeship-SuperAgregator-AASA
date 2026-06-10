@@ -1,0 +1,33 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ── Base de données ──
+data/*.db
+data/*.tvim
+*.db-journal
+*.db-wal
+
+# ── Exports ──
+exports/*.xlsx
+
+# ── Environnement ──
+.env
+.env.local
+
+# ── IDE ──
+.vscode/
+.idea/
+
+# ── Logs ──
+logs/
+*.log
+
+# ── Auth (sessions, cookies) ──
+auth/*.json
+!auth/README.md

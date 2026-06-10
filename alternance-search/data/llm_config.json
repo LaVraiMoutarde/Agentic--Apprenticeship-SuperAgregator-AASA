@@ -1,0 +1,7 @@
+{
+  "provider": "ollama",
+  "model": "qwen2.5:7b",
+  "base_url": "http://localhost:11434/v1",
+  "api_key": "",
+  "configured_at": "2026-06-10T17:46:11.007442+00:00"
+}

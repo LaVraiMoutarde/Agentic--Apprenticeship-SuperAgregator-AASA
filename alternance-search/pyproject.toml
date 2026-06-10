@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alternance-search"
+version = "0.1.0"
+description = "Système de recherche et ranking sémantique d'offres d'alternance"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Équipe Alternance" }]
+
+dependencies = [
+    # ── Scraping ──
+    "requests>=2.32",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.3",
+    "playwright>=1.48",
+
+    # ── Data ──
+    "sqlalchemy>=2.0",
+    "aiosqlite>=0.20",
+
+    # ── Embeddings ──
+    "sentence-transformers>=3.3",
+
+    # ── Vector search (turbovec built locally) ──
+    "numpy>=2.1",
+
+    # ── LLM scoring ──
+    "openai>=1.58",   # OpenAI-compatible API (local Ollama ou cloud)
+
+    # ── Export ──
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+
+    # ── CLI / utils ──
+    "click>=8.1",
+    "rich>=13.9",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+
+    # ── Web dashboard ──
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true

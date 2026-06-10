@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project_title }} — Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <!-- Font Awesome 6 (CDN) pour les icônes -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- HEADER                                                        -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <header class="header">
+        <div class="header-left">
+            <h1 class="header-title">
+                <i class="fa-solid fa-magnifying-glass-chart"></i>
+                {{ project_title }}
+            </h1>
+            <span class="header-badge">v0.1.0</span>
+        </div>
+        <div class="header-right">
+            <span class="header-status" id="system-status">
+                <span class="status-dot" id="status-dot"></span>
+                <span id="status-text">{{ system_status }}</span>
+            </span>
+        </div>
+    </header>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- MAIN LAYOUT (2 colonnes)                                      -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <main class="main-layout">
+
+        <!-- ── COLONNE GAUCHE ─────────────────────────────────────── -->
+        <aside class="sidebar">
+
+            {% block sidebar %}
+            <!-- SECTION CONTROLS -->
+            {% include "partials/_controls.html" %}
+
+            <!-- SECTION KEYWORDS -->
+            {% include "partials/_keywords.html" %}
+
+            <!-- SECTION PROFILE -->
+            {% include "partials/_profile.html" %}
+
+            <!-- SECTION LLM CONFIG -->
+            {% include "partials/_llm_config.html" %}
+            {% endblock %}
+
+        </aside>
+
+        <!-- ── COLONNE DROITE ─────────────────────────────────────── -->
+        <section class="content">
+
+            {% block content %}
+            <!-- SECTION RESULTS -->
+            {% include "partials/_results.html" %}
+
+            <!-- SECTION LOGS -->
+            {% include "partials/_logs.html" %}
+            {% endblock %}
+
+        </section>
+
+    </main>
+
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- FOOTER                                                        -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <footer class="footer">
+        <span>Alternance Search &copy; 2026</span>
+        <span id="footer-stats">
+            Offres en base&nbsp;: <strong id="total-offers">{{ total_offers }}</strong>
+            &nbsp;|&nbsp;
+            Dernier scrape&nbsp;: <em id="last-scrape">{{ last_scrape }}</em>
+            &nbsp;|&nbsp;
+            Scrapers&nbsp:&nbsp;<strong id="scrapers-count">0</strong>
+        </span>
+    </footer>
+
+    {# ── SCRIPTS BLOCK (filled by child templates) ── #}
+    {% block scripts %}{% endblock %}
+
+</body>
+</html>

@@ -1,0 +1,364 @@
+{% extends "base.html" %}
+
+{# ── SCRIPTS (loaded at end of body via base.html) ──────────────── #}
+{% block scripts %}
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// Dashboard JS — polling, fetch, UI updates
+// ═══════════════════════════════════════════════════════════════════
+
+const $ = (sel) => document.querySelector(sel);
+const API = '/api';
+
+// ── State ──────────────────────────────────────────────────────────
+let pollTimer = null;
+let isScraping = false;
+let isScoring = false;
+
+// ── Init ───────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    loadStatus();
+    loadResults();
+    pollTimer = setInterval(loadStatus, 8000);
+
+    // Bind controls
+    $('#btn-scrape').addEventListener('click', runScrape);
+    $('#btn-llm').addEventListener('click', runLLM);
+    $('#btn-export').addEventListener('click', downloadExcel);
+    $('#btn-add-keyword').addEventListener('click', addKeyword);
+    $('#keyword-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') addKeyword();
+    });
+
+        // LLM config
+        $('#btn-save-llm').addEventListener('click', saveLLMConfig);
+        $('#btn-test-llm').addEventListener('click', testLLMConnection);
+        $('#llm-provider').addEventListener('change', onLLMProviderChange);
+        loadLLMConfig();
+
+async function apiPost(path, body) {
+    const r = await fetch(API + path, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+}
+
+// ── Status ─────────────────────────────────────────────────────────
+async function loadStatus() {
+    try {
+        const s = await apiGet('/status');
+        // Header
+        $('#total-offers').textContent = s.total_offers || 0;
+        $('#last-scrape').textContent = s.last_scrape || '—';
+        $('#scrapers-count').textContent = s.scrapers_count || 0;
+
+        // Status dot
+        const dot = $('#status-dot');
+        const txt = $('#status-text');
+        if (s.active_jobs > 0) {
+            dot.className = 'status-dot running';
+            txt.textContent = '⚡ Running (' + s.active_jobs + ' jobs)';
+        } else if ((s.total_offers || 0) === 0) {
+            dot.className = 'status-dot';
+            txt.textContent = '⚫ Idle';
+        } else {
+            dot.className = 'status-dot active';
+            txt.textContent = '🟢 Ready';
+        }
+
+        // Keywords display
+        const kwList = $('#keywords-list');
+        if (s.keywords && s.keywords.length > 0) {
+            kwList.innerHTML = s.keywords.map(k => `<span class="keyword-tag">${escapeHtml(k)}</span>`).join('');
+            $('#keywords-empty').style.display = 'none';
+        } else {
+            kwList.innerHTML = '';
+            $('#keywords-empty').style.display = 'block';
+        }
+
+        // Profile display
+        const profEl = $('#profile-json');
+        const profEmpty = $('#profile-empty');
+        if (s.profile && Object.keys(s.profile).length > 0) {
+            profEl.textContent = JSON.stringify(s.profile, null, 2);
+            profEl.style.display = 'block';
+            profEmpty.style.display = 'none';
+        } else {
+            profEl.style.display = 'none';
+            profEmpty.style.display = 'block';
+        }
+
+        // Jobs
+        if (s.jobs && s.jobs.length > 0) {
+            const latest = s.jobs[0];
+            updateLogs(latest);
+        }
+    } catch(e) {
+        console.error('Status error:', e);
+    }
+}
+
+// ── Results ────────────────────────────────────────────────────────
+async function loadResults() {
+    try {
+        const data = await apiGet('/results?limit=50');
+        const tbody = $('#results-tbody');
+        if (!data || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="empty-table">Aucun résultat.</td></tr>';
+        } else {
+            tbody.innerHTML = data.map(r => `
+                <tr>
+                    <td class="cell-title">
+                        <a href="${escapeHtml(r.url || '#')}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>
+                    </td>
+                    <td>${escapeHtml(r.company)}</td>
+                    <td>${escapeHtml(r.location)}</td>
+                    <td><span class="score-badge">${r.score ? r.score.toFixed(1) : '—'}</span></td>
+                    <td><span class="source-tag source-${escapeHtml(r.source)}">${escapeHtml(r.source)}</span></td>
+                </tr>
+            `).join('');
+        }
+        $('#results-count').textContent = (data && data.length) ? data.length + ' offres' : '0 offre';
+    } catch(e) {
+        console.error('Results error:', e);
+    }
+}
+
+// ── Scrape ─────────────────────────────────────────────────────────
+async function runScrape() {
+    if (isScraping) return;
+    isScraping = true;
+    const btn = $('#btn-scrape');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Scraping...';
+
+    try {
+        const r = await apiPost('/scrape/run', {});
+        $('#log-text').textContent = 'Scraping démarré (job: ' + r.job_id + ')\n';
+        pollJobUntilDone(r.job_id, 'scrape', () => {
+            isScraping = false;
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-play"></i> Start Scraping';
+            loadResults();
+        });
+    } catch(e) {
+        $('#log-text').textContent = 'Erreur: ' + e.message;
+        isScraping = false;
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-play"></i> Start Scraping';
+    }
+}
+
+// ── LLM Scoring ────────────────────────────────────────────────────
+async function runLLM() {
+    if (isScoring) return;
+    isScoring = true;
+    const btn = $('#btn-llm');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Scoring...';
+
+    try {
+        const r = await apiPost('/llm/run', {});
+        $('#log-text').textContent = 'LLM Scoring démarré (job: ' + r.job_id + ')\n';
+        pollJobUntilDone(r.job_id, 'llm', () => {
+            isScoring = false;
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-brain"></i> Run LLM Scoring';
+            loadResults();
+        });
+    } catch(e) {
+        $('#log-text').textContent = 'Erreur: ' + e.message;
+        isScoring = false;
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-brain"></i> Run LLM Scoring';
+    }
+}
+
+// ── Export ──────────────────────────────────────────────────────────
+async function downloadExcel() {
+    const btn = $('#btn-export');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Export...';
+    try {
+        window.open(API + '/export/excel', '_blank');
+    } finally {
+        setTimeout(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-file-excel"></i> Export Excel';
+        }, 1500);
+    }
+}
+
+// ── Keywords ───────────────────────────────────────────────────────
+async function addKeyword() {
+    const input = $('#keyword-input');
+    const val = input.value.trim();
+    if (!val) return;
+
+    try {
+        await apiPost('/keywords', {keywords: [val]});
+        input.value = '';
+        loadStatus();
+    } catch(e) {
+        console.error('Keyword error:', e);
+    }
+}
+
+// ── Profile ────────────────────────────────────────────────────────
+async function saveProfile() {
+    const textarea = $('#profile-textarea');
+    try {
+        const profile = JSON.parse(textarea.value);
+        await apiPost('/profile', {profile});
+        loadStatus();
+    } catch(e) {
+        alert('JSON invalide: ' + e.message);
+    }
+}
+
+// ── Polling ────────────────────────────────────────────────────────
+async function pollJobUntilDone(jobId, type, onDone) {
+    const maxPolls = 120; // 120 * 2s = 4 min max
+    let polls = 0;
+    const interval = setInterval(async () => {
+        polls++;
+        try {
+            const job = await apiGet('/jobs/' + jobId);
+            updateLogs(job);
+            if (job.status === 'done' || job.status === 'failed' || polls >= maxPolls) {
+                clearInterval(interval);
+                onDone();
+            }
+        } catch(e) {
+            clearInterval(interval);
+            onDone();
+        }
+    }, 2000);
+}
+
+function updateLogs(job) {
+    const logEl = $('#log-text');
+    let text = `[${job.type}] ${job.status}`;
+    if (job.error) text += '\nERROR: ' + job.error;
+    if (job.result) text += '\nResult: ' + JSON.stringify(job.result);
+    if (job.logs && job.logs.length > 0) {
+        text += '\n' + job.logs.join('\n');
+    }
+    logEl.textContent = text;
+
+    if (job.error) {
+        logEl.style.borderLeft = '3px solid var(--color-danger)';
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────
+function escapeHtml(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+// ── LLM Config ──────────────────────────────────────────────────────
+const BS_NOKEY = ['ollama', 'picoclaw', 'custom'];
+
+async function loadLLMConfig() {
+    try {
+        const cfg = await apiGet('/llm/config');
+        $('#llm-provider').value = cfg.provider || 'ollama';
+        $('#llm-model').value = cfg.model || '';
+        $('#llm-base-url').value = cfg.base_url || '';
+        $('#llm-api-key').value = '';
+        if (cfg.has_api_key) {
+            $('#llm-key-preview').textContent = 'Clé sauvegardée: ' + (cfg.api_key_preview || '••••');
+        } else {
+            $('#llm-key-preview').textContent = '';
+        }
+        onLLMProviderChange();
+        if (cfg.configured_at) {
+            showLLMStatus('ok', 'Configuré (' + cfg.provider + ')');
+        }
+    } catch(e) {
+        console.error('LLM config load:', e);
+    }
+}
+
+async function saveLLMConfig() {
+    const btn = $('#btn-save-llm');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+    try {
+        await apiPost('/llm/config', {
+            provider: $('#llm-provider').value,
+            model: $('#llm-model').value.trim(),
+            base_url: $('#llm-base-url').value.trim(),
+            api_key: $('#llm-api-key').value.trim(),
+        });
+        showLLMStatus('ok', 'Configuration sauvegardée ✓');
+    } catch(e) {
+        showLLMStatus('error', 'Erreur: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Save';
+    }
+}
+
+async function testLLMConnection() {
+    const btn = $('#btn-test-llm');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Testing...';
+    showLLMStatus('', 'Test en cours...');
+    try {
+        const resp = await apiPost('/llm/test', {});
+        if (resp.status === 'ok') {
+            showLLMStatus('ok', '✓ ' + resp.message);
+        } else {
+            showLLMStatus('error', '✗ ' + resp.message);
+        }
+    } catch(e) {
+        showLLMStatus('error', '✗ ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-plug"></i> Test';
+    }
+}
+
+function onLLMProviderChange() {
+    const provider = $('#llm-provider').value;
+    const needsKey = !BS_NOKEY.includes(provider);
+    $('#llm-key-group').style.display = needsKey ? 'block' : 'none';
+
+    // Presets
+    const presets = {
+        ollama:    {model: 'qwen2.5:7b',     url: 'http://localhost:11434/v1'},
+        picoclaw:  {model: 'picoclaw:latest', url: 'http://localhost:9090/v1'},
+        openai:    {model: 'gpt-4o-mini',     url: 'https://api.openai.com/v1'},
+        anthropic: {model: 'claude-3-haiku',  url: 'https://api.anthropic.com/v1'},
+    };
+    if (presets[provider]) {
+        if (!$('#llm-model').value || $('#llm-model').dataset.auto === '1') {
+            $('#llm-model').value = presets[provider].model;
+            $('#llm-model').dataset.auto = '1';
+        }
+        if (!$('#llm-base-url').value || $('#llm-base-url').dataset.auto === '1') {
+            $('#llm-base-url').value = presets[provider].url;
+            $('#llm-base-url').dataset.auto = '1';
+        }
+    } else {
+        $('#llm-model').dataset.auto = '0';
+        $('#llm-base-url').dataset.auto = '0';
+    }
+}
+
+function showLLMStatus(type, message) {
+    const el = $('#llm-status');
+    el.style.display = 'block';
+    el.textContent = message;
+    el.className = 'llm-status-bar llm-status-' + type;
+}
+</script>
+{% endblock %}
+

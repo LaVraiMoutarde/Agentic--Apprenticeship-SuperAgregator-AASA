@@ -1,0 +1,17 @@
+<!-- partials/_profile.html — profil candidat JSON -->
+<section class="card card-profile">
+    <h2 class="card-title">
+        <i class="fa-solid fa-user-graduate"></i> Candidate Profile
+    </h2>
+    <div class="profile-display">
+        <pre id="profile-json" class="json-display" style="display:{% if profile %}block{% else %}none{% endif %}">
+{{ profile | tojson(indent=2) if profile else "" }}</pre>
+        <p id="profile-empty" class="placeholder-text" style="display:{% if not profile %}block{% else %}none{% endif %}">Profil non configuré.</p>
+    </div>
+    <div style="padding: 0 18px 14px;">
+        <textarea id="profile-textarea" class="input" rows="4" placeholder='{"desired_role":"Data Scientist","skills":["Python","SQL"],"education_level":"BAC+5","preferred_location":"Île-de-France"}' style="font-family:var(--font-mono);font-size:12px;">{% if profile %}{{ profile | tojson }}{% endif %}</textarea>
+        <button onclick="saveProfile()" class="btn btn-outline btn-sm" style="margin-top:8px;width:100%;">
+            <i class="fa-solid fa-save"></i> Save Profile
+        </button>
+    </div>
+</section>

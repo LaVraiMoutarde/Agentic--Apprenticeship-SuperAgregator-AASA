@@ -1,0 +1,25 @@
+<!-- partials/_keywords.html — saisie de mots-clés -->
+<section class="card card-keywords">
+    <h2 class="card-title">
+        <i class="fa-solid fa-tags"></i> Keywords
+    </h2>
+    <div class="keywords-input-row">
+        <input
+            id="keyword-input"
+            type="text"
+            class="input"
+            placeholder="Ex: data science, Île-de-France, BAC+5..."
+        >
+        <button id="btn-add-keyword" class="btn btn-primary btn-sm">
+            <i class="fa-solid fa-plus"></i> Add
+        </button>
+    </div>
+    <div id="keywords-list" class="keywords-list">
+        {% if keywords %}
+        {% for kw in keywords %}
+        <span class="keyword-tag">{{ kw }}</span>
+        {% endfor %}
+        {% endif %}
+    </div>
+    <p id="keywords-empty" class="placeholder-text" style="{% if keywords %}display:none{% endif %}">Aucun mot-clé saisi.</p>
+</section>

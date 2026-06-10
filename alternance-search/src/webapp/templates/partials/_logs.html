@@ -1,0 +1,9 @@
+<!-- partials/_logs.html — logs système -->
+<section class="card card-logs">
+    <h2 class="card-title">
+        <i class="fa-solid fa-terminal"></i> System Logs
+    </h2>
+    <div class="logs-container">
+        <pre id="log-text" class="logs-text">{% if logs %}{{ logs }}{% else %}Prêt. En attente d'actions...{% endif %}</pre>
+    </div>
+</section>
