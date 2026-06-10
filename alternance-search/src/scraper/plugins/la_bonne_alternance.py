@@ -59,6 +59,7 @@ class LaBonneAlternanceScraper(BaseScraper):
         *,
         location: str = "",
         max_pages: int = 5,
+        criteria=None,
     ) -> ScraperResult:
         errors: list[Exception] = []
         all_offers: list[ScrapedOffer] = []
@@ -71,7 +72,7 @@ class LaBonneAlternanceScraper(BaseScraper):
 
         # Essayer l'API Playwright d'abord (charge les offres d'emploi)
         try:
-            offers = asyncio.run(self._playwright_scrape(query, location))
+            offers = asyncio.run(self._playwright_scrape(query, location, max_pages))
             all_offers = self.validate_output(offers)
             self.logger.info("Playwright OK — %d offres", len(all_offers))
         except Exception as exc:
@@ -94,8 +95,11 @@ class LaBonneAlternanceScraper(BaseScraper):
 
     # ── Strategie 1 : Playwright avec interaction formulaire ──
 
-    async def _playwright_scrape(self, query: str, location: str) -> list[ScrapedOffer]:
-        """Charge la page, interagit avec le formulaire, parse les resultats."""
+    async def _playwright_scrape(self, query: str, location: str, max_pages: int = 5) -> list[ScrapedOffer]:
+        """Charge la page, interagit avec le formulaire, parse les resultats.
+
+        Parcourt automatiquement les pages suivantes via la pagination LBA.
+        """
         from playwright.async_api import async_playwright
 
         all_offers: list[ScrapedOffer] = []
@@ -137,25 +141,113 @@ class LaBonneAlternanceScraper(BaseScraper):
                 await page.wait_for_timeout(5000)
                 await page.wait_for_load_state("networkidle")
 
-            # Essayer d'extraire les donnees des reponses RSC
-            all_offers = self._parse_rsc_data(rsc_data)
-            if all_offers:
-                return all_offers
+            # ── Boucle de pagination ──
+            import random
 
-            # Fallback : parser le DOM
-            all_offers = await self._parse_dom(page)
-            if all_offers:
-                return all_offers
+            for page_num in range(1, max_pages + 1):
+                self.logger.info("LBA page %d/%d", page_num, max_pages)
 
-            # Dernier recours : chercher les donnees dans le script __NEXT_DATA__ ou similaire
-            page_source = await page.content()
-            all_offers = self._parse_page_source(page_source)
-            if all_offers:
-                return all_offers
+                # Réinitialiser les données RSC pour chaque page
+                rsc_data.clear()
+
+                # Attendre le chargement des résultats
+                if page_num > 1:
+                    # Essayer d'aller à la page suivante
+                    has_next = await self._next_page_lba(page)
+                    if not has_next:
+                        self.logger.info("Plus de pages disponibles sur LBA")
+                        break
+                    await page.wait_for_timeout(3000)
+                    await page.wait_for_load_state("networkidle")
+
+                # Essayer d'extraire les donnees des reponses RSC
+                page_offers = self._parse_rsc_data(rsc_data)
+                if not page_offers:
+                    # Fallback : parser le DOM
+                    page_offers = await self._parse_dom(page)
+                if not page_offers:
+                    # Dernier recours : chercher dans les scripts inline
+                    page_source = await page.content()
+                    page_offers = self._parse_page_source(page_source)
+
+                if page_offers:
+                    all_offers.extend(page_offers)
+                    self.logger.info("Page %d: %d offres (total: %d)", page_num, len(page_offers), len(all_offers))
+                else:
+                    self.logger.info("Aucune offre trouvee page %d — fin", page_num)
+                    break
+
+                # Délai de politesse entre les pages
+                await asyncio.sleep(random.uniform(1.5, 3.0))
 
             await browser.close()
 
         return all_offers
+
+    async def _next_page_lba(self, page) -> bool:
+        """Trouve et clique sur le bouton de page suivante sur La Bonne Alternance.
+
+        Essaie plusieurs stratégies de pagination dans l'ordre :
+        1. Bouton "Suivant" / "Page suivante" / "Next"
+        2. Liens de pagination numérotés avec aria-label
+        3. Bouton "Voir plus de résultats"
+        4. Incrémentation manuelle du paramètre ?page= dans l'URL
+        """
+        # Stratégie 1 : bouton "Suivant" ou flèche
+        next_selectors = [
+            'a:has-text("Suivant"), button:has-text("Suivant")',
+            'a:has-text("Page suivante"), button:has-text("Page suivante")',
+            'a[rel="next"], button[rel="next"]',
+            'a:has-text("›"), a:has-text("»"), a:has-text(">")',
+            'button:has-text("Voir plus de résultats")',
+            'button:has-text("Afficher plus")',
+            '[class*="pagination"] a:not([disabled]):not([aria-disabled="true"])',
+            'nav[aria-label="pagination"] a:not([aria-current])',
+            'a[aria-label*="suivant"], button[aria-label*="suivant"]',
+            'a[aria-label*="next"], button[aria-label*="next"]',
+        ]
+
+        for sel in next_selectors:
+            try:
+                el = page.locator(sel).first()
+                if await el.count() > 0:
+                    is_disabled = await el.get_attribute("disabled") or ""
+                    aria_disabled = await el.get_attribute("aria-disabled") or ""
+                    if "disabled" in str(is_disabled).lower() or "true" in str(aria_disabled).lower():
+                        continue
+                    await el.click()
+                    self.logger.info("Clic sur selecteur: %s", sel[:60])
+                    return True
+            except Exception:
+                continue
+
+        # Stratégie 2 : incrémenter le paramètre ?page= dans l'URL
+        current_url = page.url
+        import re
+        page_match = re.search(r'[?&]page=(\d+)', current_url)
+        if page_match:
+            current_page = int(page_match.group(1))
+            next_page = current_page + 1
+            new_url = current_url.replace(f"page={current_page}", f"page={next_page}")
+            self.logger.info("Navigation directe vers %s", new_url)
+            try:
+                await page.goto(new_url, wait_until="domcontentloaded", timeout=30000)
+                return True
+            except Exception as exc:
+                self.logger.warning("Echec navigation page %d: %s", next_page, exc)
+                return False
+
+        # Stratégie 3 : ajouter ?page=2 si pas de paramètre page
+        if "?" in current_url:
+            new_url = f"{current_url}&page=2"
+        else:
+            new_url = f"{current_url}?page=2"
+        self.logger.info("Tentative ajout page=2: %s", new_url)
+        try:
+            await page.goto(new_url, wait_until="domcontentloaded", timeout=30000)
+            return True
+        except Exception:
+            return False
 
     def _parse_rsc_data(self, rsc_data: list[dict]) -> list[ScrapedOffer]:
         """Parse les donnees RSC (React Server Components) pour extraire les offres."""

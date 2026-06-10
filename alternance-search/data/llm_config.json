@@ -1,7 +1,7 @@
 {
-  "provider": "ollama",
-  "model": "qwen2.5:7b",
-  "base_url": "http://localhost:11434/v1",
-  "api_key": "",
-  "configured_at": "2026-06-10T17:46:11.007442+00:00"
+  "provider": "openai",
+  "model": "Qwen3.6-35B-A3B-APEX-I-Compact.gguf",
+  "base_url": "http://127.0.0.1:8080/v1",
+  "api_key": "none",
+  "configured_at": "2026-06-10T22:07:34.621208+00:00"
 }

@@ -39,3 +39,11 @@ async def dashboard(request: Request) -> HTMLResponse:
         logs="",
     )
     return HTMLResponse(html)
+
+
+@router.get("/offers", response_class=HTMLResponse)
+async def offers_page(request: Request) -> HTMLResponse:
+    """Page de visualisation de la base de données."""
+    template = _env.get_template("offers.html")
+    html = template.render()
+    return HTMLResponse(html)

@@ -15,6 +15,7 @@ Points d'entrée :
 """
 
 from .base import BaseScraper, ScrapedOffer, ScraperResult, ScraperStatus
+from .criteria import SearchCriteria
 from .exceptions import (
     ScraperConfigurationError,
     ScraperError,
@@ -32,6 +33,8 @@ __all__ = [
     "ScrapedOffer",
     "ScraperResult",
     "ScraperStatus",
+    # Criteria
+    "SearchCriteria",
     # Manager
     "ScraperManager",
     # Exceptions

@@ -28,10 +28,14 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .base import BaseScraper, ScraperResult, ScraperStatus
 from .exceptions import ScraperError
 from .logging import get_scraper_logger
+
+if TYPE_CHECKING:
+    from .criteria import SearchCriteria
 
 
 class ScraperManager:
@@ -93,18 +97,18 @@ class ScraperManager:
         location: str = "",
         max_pages: int = 1,
         sources: list[str] | None = None,
+        criteria: SearchCriteria | None = None,
     ) -> dict[str, ScraperResult]:
         """Exécute tous les scrapers enregistrés (ou une sélection).
 
-        Chaque scraper tourne dans une bulle d'isolation :
-        - Une exception dans un scraper ne crashe pas les autres
-        - Les résultats sont collectés même en cas d'échec partiel
+        Chaque scraper tourne dans une bulle d'isolation.
 
         Args:
             query: Termes de recherche (transmis à chaque scraper).
             location: Filtre géographique optionnel.
             max_pages: Pages max par scraper.
             sources: Si spécifié, exécute uniquement ces scrapers.
+            criteria: Critères structurés (niveau, contrat, rayon…).
 
         Returns:
             dict[name, ScraperResult] — un résultat par scraper exécuté.
@@ -135,6 +139,7 @@ class ScraperManager:
                     query=query,
                     location=location,
                     max_pages=max_pages,
+                    criteria=criteria,
                 )
             except Exception as exc:
                 self.logger.error(

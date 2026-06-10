@@ -75,6 +75,7 @@ class WTJJScraper(BaseScraper):
         *,
         location: str = "",
         max_pages: int = 5,
+        criteria=None,
     ) -> ScraperResult:
         errors: list[Exception] = []
         all_offers: list[ScrapedOffer] = []
@@ -269,7 +270,14 @@ class WTJJScraper(BaseScraper):
     # ── Strategie 2 : Playwright ──
 
     async def _scrape_playwright(self, query: str, location: str, max_pages: int) -> list[ScrapedOffer]:
-        """Fallback Playwright — navigation et extraction du DOM ou API intercepter."""
+        """Fallback Playwright — navigation, extraction et pagination.
+
+        Parcourt les pages via :
+        1. Interception des réponses API (prioritaire)
+        2. Parsing du DOM (fallback)
+        3. Bouton "Voir plus" / "Afficher plus" pour pagination infinie
+        4. Scroll + incrémentation du paramètre ?page= dans l'URL
+        """
         from playwright.async_api import async_playwright
 
         all_offers: list[ScrapedOffer] = []
@@ -312,31 +320,145 @@ class WTJJScraper(BaseScraper):
                 await page.goto(search_url, wait_until="networkidle", timeout=self.timeout * 1000)
                 await page.wait_for_timeout(5000)
 
-                # Scroll pour declencher le lazy loading
-                for _ in range(3):
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    await page.wait_for_timeout(2000)
+                # ── Boucle de pagination ──
+                import random
 
-                # Extraire les donnees des reponses API intercepter
-                for resp in api_responses:
-                    url = resp["url"]
-                    if "/jobs" in url or "/search" in url:
-                        try:
-                            data = json.loads(resp["body"])
-                            parsed = self._parse_api_response(data)
-                            if parsed:
-                                all_offers.extend(parsed)
-                        except (json.JSONDecodeError, TypeError):
-                            continue
+                for page_num in range(1, max_pages + 1):
+                    self.logger.info("WTTJ Playwright page %d/%d", page_num, max_pages)
 
-                # Fallback: parser le DOM
-                if not all_offers:
-                    all_offers = await self._parse_dom(page)
+                    if page_num > 1:
+                        # Vider les réponses API de la page précédente
+                        api_responses.clear()
+                        has_next = await self._next_page_wttj(page)
+                        if not has_next:
+                            self.logger.info("Plus de pages disponibles sur WTTJ")
+                            break
+                        await page.wait_for_timeout(4000)
+                        await page.wait_for_load_state("networkidle")
+
+                    # Scroll pour declencher le lazy loading
+                    for _ in range(3):
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await page.wait_for_timeout(2000)
+
+                    # Extraire les donnees des reponses API intercepter
+                    page_offers: list[ScrapedOffer] = []
+                    for resp in api_responses:
+                        url = resp["url"]
+                        if "/jobs" in url or "/search" in url:
+                            try:
+                                data = json.loads(resp["body"])
+                                parsed = self._parse_api_response(data)
+                                if parsed:
+                                    page_offers.extend(parsed)
+                            except (json.JSONDecodeError, TypeError):
+                                continue
+
+                    # Fallback: parser le DOM
+                    if not page_offers:
+                        page_offers = await self._parse_dom(page)
+
+                    if page_offers:
+                        # Éviter les doublons entre pages
+                        existing_urls = {o.url for o in all_offers}
+                        new_offers = [o for o in page_offers if o.url not in existing_urls]
+                        all_offers.extend(new_offers)
+                        self.logger.info("Page %d: %d offres (%d nouvelles, total: %d)",
+                                         page_num, len(page_offers), len(new_offers), len(all_offers))
+                    else:
+                        self.logger.info("Aucune offre page %d — fin", page_num)
+                        break
+
+                    # Délai de politesse
+                    await asyncio.sleep(random.uniform(1.5, 3.0))
 
             finally:
                 await browser.close()
 
         return all_offers
+
+    async def _next_page_wttj(self, page) -> bool:
+        """Trouve et clique sur le bouton de page suivante sur WTTJ.
+
+        Stratégies :
+        1. Bouton "Voir plus" / "Afficher plus" en bas de page
+        2. Liens de pagination numérotés
+        3. Lien "Suivant" dans la pagination
+        4. Incrémentation du paramètre ?page= dans l'URL
+        """
+        # Stratégie 1 : bouton "Voir plus" / "Afficher plus" / "Load more"
+        load_selectors = [
+            'button:has-text("Voir plus"), button:has-text("Afficher plus")',
+            'button:has-text("Load more"), button:has-text("Show more")',
+            'button[class*="load-more"], button[class*="see-more"]',
+            '[class*="load-more"] button, [class*="pagination"] button',
+        ]
+
+        for sel in load_selectors:
+            try:
+                el = page.locator(sel).first()
+                if await el.count() > 0:
+                    is_disabled = await el.get_attribute("disabled") or ""
+                    aria_disabled = await el.get_attribute("aria-disabled") or ""
+                    if "disabled" in str(is_disabled).lower() or "true" in str(aria_disabled).lower():
+                        continue
+                    await el.click()
+                    self.logger.info("Clic sur bouton chargement: %s", sel[:50])
+                    return True
+            except Exception:
+                continue
+
+        # Stratégie 2 : liens de pagination
+        pagination_selectors = [
+            'a[rel="next"], a:has-text("Suivant"), a:has-text("Next")',
+            'a[aria-label*="suivant"], a[aria-label*="next"]',
+            '[class*="pagination"] a:not([disabled]):not([aria-current])',
+            'nav[aria-label="pagination"] a:not([aria-current])',
+            'a:has-text("›"), a:has-text("»")',
+        ]
+
+        for sel in pagination_selectors:
+            try:
+                el = page.locator(sel).first()
+                if await el.count() > 0:
+                    is_disabled = await el.get_attribute("disabled") or ""
+                    aria_disabled = await el.get_attribute("aria-disabled") or ""
+                    parent_class = await el.locator("..").get_attribute("class") or ""
+                    if "disabled" in str(is_disabled).lower() or "true" in str(aria_disabled).lower() or "disabled" in parent_class:
+                        continue
+                    await el.click()
+                    self.logger.info("Clic sur lien pagination: %s", sel[:50])
+                    return True
+            except Exception:
+                continue
+
+        # Stratégie 3 : incrémenter ?page= dans l'URL
+        current_url = page.url
+        import re
+        page_match = re.search(r'[?&]page=(\d+)', current_url)
+        if page_match:
+            current_page = int(page_match.group(1))
+            next_page = current_page + 1
+            new_url = current_url.replace(f"page={current_page}", f"page={next_page}")
+            self.logger.info("Navigation directe vers %s", new_url)
+            try:
+                await page.goto(new_url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
+                return True
+            except Exception as exc:
+                self.logger.warning("Echec navigation page %d: %s", next_page, exc)
+                return False
+
+        # Stratégie 4 : ajouter ?page=2 si pas de paramètre page
+        if "?" in current_url:
+            new_url = f"{current_url}&page=2"
+        else:
+            new_url = f"{current_url}?page=2"
+        self.logger.info("Tentative ajout page=2: %s", new_url)
+        try:
+            await page.goto(new_url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
+            return True
+        except Exception:
+            return False
 
     async def _parse_dom(self, page) -> list[ScrapedOffer]:
         """Parse les offres depuis le DOM Playwright."""

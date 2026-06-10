@@ -66,6 +66,7 @@ class JobTeaserEnseaScraper(BaseScraper):
         *,
         location: str = "",
         max_pages: int = 5,
+        criteria=None,
     ) -> ScraperResult:
         errors: list[Exception] = []
         all_offers: list[ScrapedOffer] = []

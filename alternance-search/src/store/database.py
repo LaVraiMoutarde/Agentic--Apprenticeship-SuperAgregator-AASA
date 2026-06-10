@@ -87,3 +87,18 @@ def drop_db() -> None:
 
     engine = get_engine()
     Base.metadata.drop_all(engine)
+
+
+def clear_db() -> int:
+    """Supprime toutes les lignes de la table offers, mais garde la structure.
+
+    Returns:
+        Nombre d'offres supprimées.
+    """
+    from .models import Offer
+
+    with get_session() as session:
+        count = session.query(Offer).count()
+        session.query(Offer).delete()
+        session.commit()
+        return count

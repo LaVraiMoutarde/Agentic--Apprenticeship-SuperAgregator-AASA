@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from src.store import init_db, get_session, Offer, OfferRepository
+from src.scraper.criteria import SearchCriteria
 from src.webapp.jobs import (
     create_job,
     get_job,
@@ -43,8 +44,32 @@ router = APIRouter(prefix="/api")
 # ── Références aux modules métier (lazy, évite imports circulaires) ───
 _scraper_manager = None
 _scorer = None
-_keywords: list[str] = []
+_criteria = SearchCriteria()
+
 _profile: dict = {}
+_semantic_pipeline = None
+_click_tracker = None
+
+
+def _get_semantic_pipeline():
+    """Retourne le SemanticPipeline (singleton)."""
+    global _semantic_pipeline
+    if _semantic_pipeline is None:
+        try:
+            from src.scoring.semantic_pipeline import SemanticPipeline
+            _semantic_pipeline = SemanticPipeline()
+        except ImportError:
+            pass
+    return _semantic_pipeline
+
+
+def _get_click_tracker():
+    """Retourne le ClickTracker (singleton)."""
+    global _click_tracker
+    if _click_tracker is None:
+        from src.scoring.click_tracker import ClickTracker
+        _click_tracker = ClickTracker()
+    return _click_tracker
 
 
 def _get_scraper_manager():
@@ -82,6 +107,18 @@ def _get_scraper_manager():
 
 class KeywordsPayload(BaseModel):
     keywords: list[str]
+
+
+class KeywordsRemovePayload(BaseModel):
+    keyword: str
+
+
+class CriteriaPayload(BaseModel):
+    search_terms: list[str] = []
+    location: str = ""
+    radius_km: int = 0
+    education_levels: list[str] = []
+    contract: str = ""
 
 
 class ProfilePayload(BaseModel):
@@ -126,7 +163,7 @@ async def system_status():
         "scrapers_count": len(scrapers_registered),
         "active_jobs": len(running),
         "jobs": jobs[:10],
-        "keywords": _keywords,
+        "criteria": _criteria.to_dict(),
         "profile": _profile,
     }
 
@@ -149,34 +186,51 @@ async def trigger_scrape():
     def _run():
         update_job(job_id, status="running", log_line="Starting all scrapers...")
         try:
-            query = " ".join(_keywords) if _keywords else "alternance"
-            results = manager.run_all(
-                query=query,
-                max_pages=3,
-            )
-            total = sum(r.success_count for r in results.values())
-            failures = sum(1 for r in results.values() if r.status.value == "failed")
+            location = _criteria.location
+            queries = _criteria.active_queries
+            total_offers = 0
+            total_failures = 0
+            total_sources = 0
 
-            # Stocker les offres en base
+            for qi, query in enumerate(queries):
+                update_job(job_id, log_line=f"Terme {qi+1}/{len(queries)}: '{query}'...")
+                results = manager.run_all(
+                    query=query,
+                    location=location,
+                    max_pages=3,
+                    criteria=_criteria if _criteria.has_filters else None,
+                )
+                total_offers += sum(r.success_count for r in results.values())
+                total_failures += sum(1 for r in results.values() if r.status.value == "failed")
+                total_sources = len(results)
+
+                # Stocker les offres en base
+                try:
+                    from src.normalizer.pipeline import NormalizationPipeline
+                    repo = OfferRepository()
+                    pipe = NormalizationPipeline(log=None)
+                    for name, result in results.items():
+                        if result.offers:
+                            clean = pipe.process(result.offers)
+                            repo.upsert_batch(clean)
+                except Exception as e:
+                    update_job(job_id, log_line=f"Store warning: {e}")
+
+            # Auto-indexation : mise à jour de l'index sémantique
             try:
-                from src.normalizer.pipeline import NormalizationPipeline
-                repo = OfferRepository()
-                pipe = NormalizationPipeline(log=None)
-                stored = 0
-                for name, result in results.items():
-                    if result.offers:
-                        clean = pipe.process(result.offers)
-                        stats = repo.upsert_batch(clean)
-                        stored += stats["new"] + stats["updated"]
-                update_job(job_id, log_line=f"Stored {stored} offers in DB")
+                pipe = _get_semantic_pipeline()
+                if pipe is not None:
+                    update_job(job_id, log_line="Mise à jour de l'index sémantique...")
+                    result = pipe.embed_and_index_all()
+                    update_job(job_id, log_line=f"Index : {result['indexed']} offres encodées ({result['elapsed_ms']:.0f}ms)")
             except Exception as e:
-                update_job(job_id, log_line=f"Store warning: {e}")
+                update_job(job_id, log_line=f"Indexation ignorée : {e}")
 
             update_job(
                 job_id,
                 status="done",
-                result={"total_offers": total, "failures": failures, "sources": len(results)},
-                log_line=f"Done: {total} offers, {failures} failures",
+                result={"total_offers": total_offers, "failures": total_failures, "sources": total_sources, "queries": len(queries)},
+                log_line=f"Done: {total_offers} offers from {len(queries)} queries, {total_failures} failures",
             )
         except Exception as e:
             update_job(job_id, status="failed", error=str(e), log_line=f"Failed: {e}")
@@ -193,9 +247,22 @@ async def trigger_scrape():
 
 @router.post("/llm/run")
 async def trigger_llm_scoring():
-    """Lance le scoring LLM sur les offres existantes."""
-    if not _profile:
-        raise HTTPException(400, "Configurez d'abord le profil candidat.")
+    """Lance le scoring LLM sur les offres existantes en utilisant le profil du chat builder.
+
+    Si aucun profil n'a été construit via le chat, utilise le profil legacy (_profile).
+    """
+    # Récupérer le profil depuis le chat builder (import lazy pour éviter circ)
+    from src.webapp.routes.profile import get_chat_profile
+
+    chat_profile = get_chat_profile()
+
+    # Fallback : profil legacy si le chat n'a rien produit
+    profile_source = chat_profile if chat_profile and any(
+        v for v in chat_profile.values() if v
+    ) else _profile
+
+    if not profile_source:
+        raise HTTPException(400, "Configurez d'abord un profil candidat via le chat (ou le profil legacy).")
 
     job_id = create_job("llm")
 
@@ -205,30 +272,85 @@ async def trigger_llm_scoring():
             from src.scoring.llm_scorer import LLMScorer, CandidateProfile
             from src.store.repository import OfferRepository
 
-            repo = OfferRepository()
-            offers = repo.find(limit=50)
+            update_job(job_id, log_line="Chargement du profil...")
 
-            if not offers:
-                update_job(job_id, status="done", result={"scored": 0}, log_line="No offers to score")
-                return
-
+            # Mapper le profil JSON (chat builder) vers CandidateProfile
             profile = CandidateProfile(
-                desired_role=_profile.get("desired_role", ""),
-                skills=_profile.get("skills", []),
-                education_level=_profile.get("education_level", ""),
-                preferred_location=_profile.get("preferred_location", ""),
-                preferred_domain=_profile.get("preferred_domain", ""),
+                current_level=profile_source.get("education_level", ""),
+                target_level=profile_source.get("education_level", ""),
+                domain=profile_source.get("desired_role", ""),
+                skills=profile_source.get("skills", []),
+                languages=profile_source.get("languages", []),
+                preferred_locations=(
+                    [profile_source["preferred_location"]]
+                    if profile_source.get("preferred_location")
+                    else []
+                ),
+                preferred_contract=profile_source.get("preferred_contract", ""),
+                project=(
+                    profile_source.get("summary", "")
+                    or profile_source.get("project", "")
+                ),
             )
 
+            # Étape 1 : Pré-filtrage sémantique (si l'index est dispo)
+            pipe = _get_semantic_pipeline()
+            repo = OfferRepository()
+            total_in_db = repo.count_all()
+
+            if pipe is not None and pipe.index_size > 0:
+                update_job(job_id, log_line=f"Index trouvé ({pipe.index_size} offres), pré-filtrage sémantique...")
+                offers = pipe.search_by_profile_dict(profile_source, top_k=200)
+                update_job(job_id, log_line=f"Pré-filtrage : {len(offers)} offres candidates (sur {total_in_db} en base)")
+            else:
+                update_job(job_id, log_line="Pas d'index sémantique, scoring sur les 50 plus récentes...")
+                offers = repo.find(limit=50)
+
+            if not offers:
+                update_job(job_id, status="done", result={"scored": 0, "total_in_db": total_in_db},
+                           log_line="No offers to score")
+                return
+
+            # Étape 2 : Scoring LLM sur les offres pré-filtrées
+            update_job(job_id, log_line=f"Scoring LLM sur {len(offers)} offres...")
             scorer = LLMScorer()
-            results = scorer.score_offers_batch(offers, profile)
-            scored_count = len([r for r in results if r is not None])
+
+            # Convertir les Offer en SearchResult (format attendu par le scorer)
+            from src.search.retriever import SearchResult
+            search_results = [
+                SearchResult(offer=o, similarity_score=0.0, rank=i+1)
+                for i, o in enumerate(offers)
+            ]
+
+            scored_results = scorer.score_offers_batch(profile, search_results)
+            scored_count = len([r for r in scored_results if r is not None])
+
+            # Persister les scores en base
+            try:
+                saved = 0
+                for sr in scored_results:
+                    if sr is None:
+                        continue
+                    offer_id = sr.search_result.offer.id
+                    score_val = sr.llm_score.global_score  # /100
+                    if score_val and score_val > 0:
+                        with get_session() as sess:
+                            sess.query(Offer).filter(Offer.id == offer_id).update(
+                                {"llm_score": score_val / 100.0}
+                            )
+                            sess.commit()
+                        saved += 1
+                if saved:
+                    update_job(job_id, log_line=f"{saved} scores sauvegardés en base")
+            except Exception as e:
+                update_job(job_id, log_line=f"Sauvegarde scores ignorée : {e}")
 
             update_job(
                 job_id,
                 status="done",
-                result={"scored": scored_count, "total": len(offers)},
-                log_line=f"Done: {scored_count}/{len(offers)} scored",
+                result={"scored": scored_count, "total": len(offers), "total_in_db": total_in_db,
+                        "prefiltered": pipe is not None and pipe.index_size > 0},
+                log_line=f"Done: {scored_count}/{len(offers)} scored (pre-filtered from {total_in_db} offers)",
             )
         except Exception as e:
             update_job(job_id, status="failed", error=str(e), log_line=f"Failed: {e}")
@@ -238,30 +360,141 @@ async def trigger_llm_scoring():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# POST /api/keywords
+# POST /api/index/build
 # ═══════════════════════════════════════════════════════════════════════
 
-@router.post("/keywords")
-async def add_keywords(payload: KeywordsPayload):
-    """Ajoute des mots-clés pour les scrapers."""
-    global _keywords
-    for kw in payload.keywords:
-        kw = kw.strip()
-        if kw and kw not in _keywords:
-            _keywords.append(kw)
-    return {"keywords": _keywords, "count": len(_keywords)}
+@router.post("/index/build")
+async def build_index():
+    """Construit/reconstruit l'index sémantique à partir de toutes les offres en base."""
+    job_id = create_job("index")
+
+    def _run():
+        update_job(job_id, status="running", log_line="Building semantic index...")
+        try:
+            pipe = _get_semantic_pipeline()
+            if pipe is None:
+                update_job(job_id, status="failed", error="pip install sentence-transformers turbovec")
+                return
+            result = pipe.embed_and_index_all()
+            update_job(
+                job_id, status="done",
+                result=result,
+                log_line=f"Indexed {result['indexed']} offers in {result['elapsed_ms']:.0f}ms",
+            )
+        except Exception as e:
+            update_job(job_id, status="failed", error=str(e), log_line=f"Index failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "started"}
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# POST /api/profile
+# GET /api/index/status
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/index/status")
+async def index_status():
+    """Retourne le statut de l'index sémantique."""
+    pipe = _get_semantic_pipeline()
+    if pipe is None:
+        return {"ready": False, "size": 0, "message": "Dépendances manquantes (sentence-transformers/turbovec)"}
+    pipe.init()
+    return {"ready": pipe.index_size > 0, "size": pipe.index_size}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Feedback loop — track clicks for scoring boost
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.post("/feedback/click")
+async def record_click(payload: dict):
+    """Enregistre un clic sur une offre."""
+    try:
+        tracker = _get_click_tracker()
+        tracker.record_click(payload)
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/feedback/stats")
+async def feedback_stats():
+    """Statistiques du feedback utilisateur."""
+    tracker = _get_click_tracker()
+    return tracker.get_stats()
+
+
+@router.delete("/feedback/reset")
+async def feedback_reset():
+    """Réinitialise tout l'historique des clics."""
+    tracker = _get_click_tracker()
+    tracker.reset()
+    return {"status": "reset"}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# CRITERIA endpoints
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/criteria")
+async def get_criteria():
+    """Retourne les critères actuels."""
+    return _criteria.to_dict()
+
+
+@router.post("/criteria/save")
+async def save_criteria(payload: CriteriaPayload):
+    """Enregistre les critères (termes de recherche, localisation, niveau, contrat…)."""
+    global _criteria
+    _criteria.search_terms = payload.search_terms
+    _criteria.location = payload.location
+    _criteria.radius_km = payload.radius_km
+    _criteria.education_levels = payload.education_levels
+    _criteria.contract = payload.contract
+    return _criteria.to_dict()
+
+
+@router.delete("/criteria/reset")
+async def reset_criteria():
+    """Réinitialise tous les critères."""
+    global _criteria
+    _criteria = SearchCriteria()
+    return _criteria.to_dict()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GET/POST /api/profile (legacy — pour compatibilité temporaire)
 # ═══════════════════════════════════════════════════════════════════════
 
 @router.post("/profile")
 async def set_profile(payload: ProfilePayload):
-    """Définit le profil candidat."""
+    """Définit le profil candidat (legacy)."""
     global _profile
     _profile = payload.profile
     return {"profile": _profile}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Helper — sérialisation d'une offre
+# ═══════════════════════════════════════════════════════════════════════
+
+def _offer_dict(o) -> dict:
+    return {
+        "id": o.id,
+        "title": o.title or "",
+        "company": o.company or "",
+        "location": o.location or "",
+        "region": o.region or "",
+        "source": o.source or "",
+        "source_id": o.source_id or "",
+        "url": o.url or "",
+        "contract_type": o.contract_type or "",
+        "required_level": o.required_level or "",
+        "domain": o.domain or "",
+        "description": (o.description or "")[:500],
+        "scraped_date": o.scraped_date or "",
+        "score": o.llm_score or o.data_quality_score or 0,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -269,28 +502,57 @@ async def set_profile(payload: ProfilePayload):
 # ═══════════════════════════════════════════════════════════════════════
 
 @router.get("/results")
-async def get_results(limit: int = Query(50, ge=1, le=500)):
-    """Retourne les offres depuis la base, triées par date de scrape."""
+async def get_results(
+    limit: int = Query(50, ge=1, le=500),
+    sort: str = "score",
+):
+    """Retourne les offres depuis la base, triées par score LLM ou par date."""
     try:
         init_db()
         repo = OfferRepository()
-        offers = repo.find(limit=limit)
-        return [
-            {
-                "id": o.id,
-                "title": o.title or "",
-                "company": o.company or "",
-                "location": o.location or "",
-                "source": o.source or "",
-                "url": o.url or "",
-                "scraped_date": o.scraped_date or "",
-                "score": o.data_quality_score or 0,
-                "contract_type": o.contract_type or "",
-            }
-            for o in offers
-        ]
+        order_by_score = sort == "score"
+        offer_list = repo.find(limit=limit, order_by_score=order_by_score)
+        return [_offer_dict(o) for o in offer_list]
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GET /api/results/search
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/results/search")
+async def search_results(
+    q: str = "",
+    source: str = "",
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Recherche texte dans les offres (titre, entreprise, description)."""
+    try:
+        init_db()
+        repo = OfferRepository()
+        offers = repo.search(query=q, source=source or None, limit=limit, offset=offset)
+        total = repo.count_all()
+        return {"offers": [_offer_dict(o) for o in offers], "total": total}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GET /api/results/sources
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/results/sources")
+async def get_sources():
+    """Retourne la liste des sources disponibles."""
+    try:
+        init_db()
+        with get_session() as s:
+            rows = s.query(Offer.source).filter(Offer.is_active == 1).distinct().all()
+            return {"sources": [r[0] for r in rows]}
+    except Exception as e:
+        return {"sources": []}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -315,6 +577,26 @@ async def export_excel():
             filename="export_dashboard.xlsx",
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DELETE /api/db/clear
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.delete("/db/clear")
+async def clear_database():
+    """Supprime toutes les offres de la base de données.
+
+    Les tables restent intactes, seules les données sont effacées.
+    Utile pour repartir à zéro après des tests.
+    """
+    try:
+        from src.store import clear_db
+        init_db()
+        deleted = clear_db()
+        return {"status": "ok", "deleted_count": deleted}
     except Exception as e:
         raise HTTPException(500, str(e))
 

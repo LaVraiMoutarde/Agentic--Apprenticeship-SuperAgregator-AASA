@@ -8,7 +8,7 @@ Responsabilités :
 - Déduplication : détection par (source, source_id)
 """
 
-from .database import init_db, drop_db, get_session, get_engine
+from .database import clear_db, drop_db, get_engine, get_session, init_db
 from .models import Offer
 from .repository import OfferRepository
 

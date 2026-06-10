@@ -1,0 +1,100 @@
+<!-- partials/_criteria.html — Critères de recherche (mots-clés + filtres structurés) -->
+<section class="card card-criteria">
+    <h2 class="card-title">
+        <i class="fa-solid fa-magnifying-glass"></i> Critères de recherche
+        <span class="card-badge" id="criteria-badge">optionnel</span>
+    </h2>
+
+    <!-- ── Termes de recherche (chaque ligne = 1 requête) ──────── -->
+    <div class="search-terms-section">
+        <div class="search-terms-header">
+            <span class="search-terms-title">
+                <i class="fa-solid fa-table-list"></i> Termes à rechercher
+            </span>
+            <span class="search-terms-hint">Chaque terme = une recherche indépendante</span>
+        </div>
+        <div class="search-terms-table">
+            <div id="search-terms-rows"></div>
+        </div>
+        <p id="search-terms-empty" class="placeholder-text" style="padding:12px 0;">Aucun terme saisi. Ajoutez des noms de postes, domaines... (ex: Data Scientist, Développeur Python)</p>
+        <div class="search-terms-add autocomplete-wrap">
+            <div class="autocomplete-container">
+                <input id="search-term-input" type="text" class="input input-sm autocomplete-input"
+                       placeholder="Ex: Data Scientist, Développeur Web, Alternance..."
+                       autocomplete="off">
+                <div id="autocomplete-list" class="autocomplete-items" style="display:none;"></div>
+            </div>
+            <button id="btn-add-search-term" class="btn btn-primary btn-sm">
+                <i class="fa-solid fa-plus"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- ── Critères structurés ──────────────────────────────────── -->
+    <div class="criteria-form">
+        <!-- Localisation -->
+        <div class="criteria-row">
+            <label class="criteria-label">
+                <i class="fa-solid fa-location-dot"></i> Localisation
+            </label>
+            <input id="criteria-location" type="text" class="input input-sm"
+                   placeholder="Ex: Paris, Île-de-France...">
+        </div>
+
+        <!-- Rayon -->
+        <div class="criteria-row">
+            <label class="criteria-label">
+                <i class="fa-solid fa-arrows-up-down-left-right"></i> Rayon
+            </label>
+            <select id="criteria-radius" class="input input-sm">
+                <option value="0">Pas de limite</option>
+                <option value="5">5 km</option>
+                <option value="10">10 km</option>
+                <option value="20">20 km</option>
+                <option value="30">30 km</option>
+                <option value="50">50 km</option>
+                <option value="100">100 km</option>
+            </select>
+        </div>
+
+        <!-- Niveau d'études (checkboxes) -->
+        <div class="criteria-row criteria-row-multiline">
+            <label class="criteria-label">
+                <i class="fa-solid fa-graduation-cap"></i> Niveau études
+            </label>
+            <div class="criteria-checkboxes" id="criteria-education-checkboxes">
+                <label class="criteria-chk"><input type="checkbox" value="BAC"> BAC</label>
+                <label class="criteria-chk"><input type="checkbox" value="BAC+1"> BAC+1</label>
+                <label class="criteria-chk"><input type="checkbox" value="BAC+2"> BAC+2</label>
+                <label class="criteria-chk"><input type="checkbox" value="BAC+3"> BAC+3</label>
+                <label class="criteria-chk"><input type="checkbox" value="BAC+4"> BAC+4</label>
+                <label class="criteria-chk"><input type="checkbox" value="BAC+5"> BAC+5</label>
+                <label class="criteria-chk"><input type="checkbox" value="BAC+6"> BAC+6</label>
+                <label class="criteria-chk"><input type="checkbox" value="BAC+7"> BAC+7</label>
+                <label class="criteria-chk"><input type="checkbox" value="BAC+8"> BAC+8</label>
+            </div>
+        </div>
+
+        <!-- Type de contrat -->
+        <div class="criteria-row">
+            <label class="criteria-label">
+                <i class="fa-solid fa-file-contract"></i> Contrat
+            </label>
+            <select id="criteria-contract" class="input input-sm">
+                <option value="">Indifférent</option>
+                <option value="apprentissage">Apprentissage</option>
+                <option value="professionnalisation">Professionnalisation</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- ── Actions ──────────────────────────────────────────────── -->
+    <div class="criteria-actions">
+        <button id="btn-save-criteria" class="btn btn-outline btn-sm">
+            <i class="fa-solid fa-floppy-disk"></i> Appliquer
+        </button>
+        <button id="btn-reset-criteria" class="btn btn-outline btn-sm">
+            <i class="fa-solid fa-rotate-left"></i> Réinitialiser
+        </button>
+    </div>
+</section>

@@ -59,6 +59,7 @@ class IndeedScraper(BaseScraper):
         *,
         location: str = "",
         max_pages: int = 10,
+        criteria=None,
     ) -> ScraperResult:
         errors: list[Exception] = []
         all_offers: list[ScrapedOffer] = []

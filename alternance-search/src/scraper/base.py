@@ -16,11 +16,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
 
 from .logging import get_scraper_logger
+
+if TYPE_CHECKING:
+    from .criteria import SearchCriteria
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -184,6 +187,7 @@ class BaseScraper(ABC):
         *,
         location: str = "",
         max_pages: int = 1,
+        criteria: SearchCriteria | None = None,
     ) -> ScraperResult:
         """Exécute le scraping et retourne les résultats standardisés.
 

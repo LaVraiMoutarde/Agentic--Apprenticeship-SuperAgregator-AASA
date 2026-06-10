@@ -88,13 +88,15 @@ class OfferRepository:
         limit: int = 100,
         offset: int = 0,
         source: str | None = None,
+        order_by_score: bool = False,
     ) -> list[Offer]:
-        """Récupère les offres actives, triées par date de scrape décroissante."""
+        """Récupère les offres actives, triées par score LLM ou date de scrape."""
         with get_session() as s:
             q = s.query(Offer).filter(Offer.is_active == 1)
             if source:
                 q = q.filter(Offer.source == source)
-            return q.order_by(Offer.scraped_date.desc()).limit(limit).offset(offset).all()
+            order = Offer.llm_score.desc().nullslast() if order_by_score else Offer.scraped_date.desc()
+            return q.order_by(order).limit(limit).offset(offset).all()
 
     def find_active(
         self,
@@ -128,6 +130,34 @@ class OfferRepository:
             return []
         with get_session() as s:
             return s.query(Offer).filter(Offer.id.in_(ids), Offer.is_active == 1).all()
+
+    def search(
+        self,
+        *,
+        query: str = "",
+        source: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[Offer]:
+        """Recherche texte dans les offres (titre, entreprise, description)."""
+        with get_session() as s:
+            q = s.query(Offer).filter(Offer.is_active == 1)
+            if query:
+                like = f"%{query}%"
+                q = q.filter(
+                    (Offer.title.like(like)) |
+                    (Offer.company.like(like)) |
+                    (Offer.description.like(like)) |
+                    (Offer.location.like(like))
+                )
+            if source:
+                q = q.filter(Offer.source == source)
+            return q.order_by(Offer.scraped_date.desc()).limit(limit).offset(offset).all()
+
+    def count_all(self) -> int:
+        """Retourne le nombre total d'offres actives."""
+        with get_session() as s:
+            return s.query(Offer).filter(Offer.is_active == 1).count()
 
     def count_active(self) -> int:
         """Nombre d'offres actives."""

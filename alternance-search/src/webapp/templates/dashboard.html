@@ -14,6 +14,14 @@ const API = '/api';
 let pollTimer = null;
 let isScraping = false;
 let isScoring = false;
+let sortOrder = 'score'; // 'score' ou 'date'
+
+// ── Sort Toggle ────────────────────────────────────────────────────
+function toggleSort() {
+    sortOrder = sortOrder === 'score' ? 'date' : 'score';
+    document.getElementById('sort-label').textContent = sortOrder === 'score' ? 'Score' : 'Date';
+    loadResults();
+}
 
 // ── Init ───────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -25,16 +33,25 @@ document.addEventListener('DOMContentLoaded', () => {
     $('#btn-scrape').addEventListener('click', runScrape);
     $('#btn-llm').addEventListener('click', runLLM);
     $('#btn-export').addEventListener('click', downloadExcel);
-    $('#btn-add-keyword').addEventListener('click', addKeyword);
-    $('#keyword-input').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') addKeyword();
-    });
+    $('#btn-clear-db').addEventListener('click', clearDatabase);
+    $('#btn-build-index').addEventListener('click', buildIndex);
+
+    // Check index + feedback status
+    checkIndexStatus();
+    checkFeedbackStatus();
 
         // LLM config
         $('#btn-save-llm').addEventListener('click', saveLLMConfig);
         $('#btn-test-llm').addEventListener('click', testLLMConnection);
         $('#llm-provider').addEventListener('change', onLLMProviderChange);
         loadLLMConfig();
+});
+
+async function apiGet(path) {
+    const r = await fetch(API + path);
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+}
 
 async function apiPost(path, body) {
     const r = await fetch(API + path, {
@@ -69,26 +86,11 @@ async function loadStatus() {
             txt.textContent = '🟢 Ready';
         }
 
-        // Keywords display
-        const kwList = $('#keywords-list');
-        if (s.keywords && s.keywords.length > 0) {
-            kwList.innerHTML = s.keywords.map(k => `<span class="keyword-tag">${escapeHtml(k)}</span>`).join('');
-            $('#keywords-empty').style.display = 'none';
-        } else {
-            kwList.innerHTML = '';
-            $('#keywords-empty').style.display = 'block';
-        }
-
-        // Profile display
-        const profEl = $('#profile-json');
-        const profEmpty = $('#profile-empty');
-        if (s.profile && Object.keys(s.profile).length > 0) {
-            profEl.textContent = JSON.stringify(s.profile, null, 2);
-            profEl.style.display = 'block';
-            profEmpty.style.display = 'none';
-        } else {
-            profEl.style.display = 'none';
-            profEmpty.style.display = 'block';
+        // Profile display (only if managed outside the builder)
+        const profDisplay = $('#profile-json-display');
+        if (profDisplay && s.profile && Object.keys(s.profile).length > 0 && !profDisplay.textContent) {
+            profDisplay.textContent = JSON.stringify(s.profile, null, 2);
+            $('#profile-preview-area').style.display = 'block';
         }
 
         // Jobs
@@ -104,22 +106,26 @@ async function loadStatus() {
 // ── Results ────────────────────────────────────────────────────────
 async function loadResults() {
     try {
-        const data = await apiGet('/results?limit=50');
+        const data = await apiGet('/results?limit=50&sort=' + sortOrder);
         const tbody = $('#results-tbody');
         if (!data || data.length === 0) {
             tbody.innerHTML = '<tr><td colspan="5" class="empty-table">Aucun résultat.</td></tr>';
         } else {
-            tbody.innerHTML = data.map(r => `
+            tbody.innerHTML = data.map((r, idx) => {
+                const score = r.score || 0;
+                const scoreColor = score >= 0.7 ? 'var(--color-accent)' : score >= 0.4 ? '#d97706' : 'var(--color-text-muted)';
+                const scoreLabel = score > 0 ? (score * 100).toFixed(0) + '%' : '—';
+                return `
                 <tr>
                     <td class="cell-title">
-                        <a href="${escapeHtml(r.url || '#')}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>
+                        <a href="${escapeHtml(r.url || '#')}" target="_blank" rel="noopener" onclick="trackClick(${r.id || idx}, '${escapeHtml((r.company || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.source || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.title || '').replace(/'/g, "\\'"))}')">${escapeHtml(r.title)}</a>
                     </td>
                     <td>${escapeHtml(r.company)}</td>
                     <td>${escapeHtml(r.location)}</td>
-                    <td><span class="score-badge">${r.score ? r.score.toFixed(1) : '—'}</span></td>
+                    <td><span class="score-badge" style="background:${scoreColor}20;color:${scoreColor}">${scoreLabel}</span></td>
                     <td><span class="source-tag source-${escapeHtml(r.source)}">${escapeHtml(r.source)}</span></td>
-                </tr>
-            `).join('');
+                </tr>`;
+            }).join('');
         }
         $('#results-count').textContent = (data && data.length) ? data.length + ' offres' : '0 offre';
     } catch(e) {
@@ -192,31 +198,691 @@ async function downloadExcel() {
     }
 }
 
-// ── Keywords ───────────────────────────────────────────────────────
-async function addKeyword() {
-    const input = $('#keyword-input');
-    const val = input.value.trim();
-    if (!val) return;
-
+// ── Clear Database ────────────────────────────────────────────────
+async function clearDatabase() {
+    if (!confirm('⚠️ Supprimer toutes les offres de la base de données ?\nCette action est irréversible.')) return;
+    const btn = $('#btn-clear-db');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Clearing...';
     try {
-        await apiPost('/keywords', {keywords: [val]});
-        input.value = '';
+        const r = await fetch(API + '/db/clear', { method: 'DELETE' });
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        $('#log-text').textContent = `🗑️ Base vidée : ${data.deleted_count} offre(s) supprimée(s)`;
         loadStatus();
+        loadResults();
     } catch(e) {
-        console.error('Keyword error:', e);
+        $('#log-text').textContent = 'Erreur clear DB: ' + e.message;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-trash-can"></i> Clear DB';
     }
 }
 
-// ── Profile ────────────────────────────────────────────────────────
-async function saveProfile() {
-    const textarea = $('#profile-textarea');
+// ── Build Index ──────────────────────────────────────────────────
+async function checkIndexStatus() {
     try {
-        const profile = JSON.parse(textarea.value);
-        await apiPost('/profile', {profile});
-        loadStatus();
-    } catch(e) {
-        alert('JSON invalide: ' + e.message);
+        const r = await fetch(API + '/index/status');
+        const data = await r.json();
+        if (data.size > 0) {
+            $('#btn-index-text').textContent = `Index: ${data.size} offres`;
+            $('#btn-index-text').style.color = 'var(--color-accent)';
+        } else {
+            $('#btn-index-text').textContent = 'Build Index';
+            $('#btn-index-text').style.color = 'var(--color-secondary)';
+        }
+    } catch(e) { console.error('Index status:', e); }
+}
+
+async function buildIndex() {
+    if (!confirm('Construire l\'index sémantique ?\nCela peut prendre quelques dizaines de secondes.')) return;
+    const btn = $('#btn-build-index'); btn.disabled = true;
+    $('#btn-index-text').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Indexing...';
+    try {
+        const r = await fetch(API + '/index/build', { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        pollJobUntilDone(data.job_id, 'index', () => { btn.disabled = false; checkIndexStatus(); });
+    } catch(e) { $('#log-text').textContent = 'Erreur index: ' + e.message; btn.disabled = false; $('#btn-index-text').textContent = 'Build Index'; }
+}
+
+// ── Feedback Loop ────────────────────────────────────────────────
+async function trackClick(id, company, source, title) {
+    try {
+        await fetch(API + '/feedback/click', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ id, company, source, title }),
+        });
+        checkFeedbackStatus();
+    } catch(e) { console.error('Track click:', e); }
+}
+
+async function checkFeedbackStatus() {
+    try {
+        const r = await fetch(API + '/feedback/stats');
+        const data = await r.json();
+        const btn = $('#btn-feedback-reset');
+        const txt = $('#btn-feedback-text');
+        if (data.total_clicks > 0) {
+            btn.style.display = 'inline-flex';
+            txt.textContent = `🎯 ${data.total_clicks} clic(s) · +${(data.boost_factor * 100).toFixed(0)}%/co`;
+        } else {
+            btn.style.display = 'none';
+        }
+    } catch(e) { /* silent */ }
+}
+
+async function resetFeedback() {
+    if (!confirm('Réinitialiser la pondération par clics ?')) return;
+    await fetch(API + '/feedback/reset', { method: 'DELETE' });
+    checkFeedbackStatus();
+    $('#log-text').textContent = '🧹 Pondération réinitialisée';
+}
+let _searchTerms = [];
+
+// ── Suggestions pour l'autocomplétion ─────────────────────────────
+const SEARCH_SUGGESTIONS = [
+    // ── Data / IA ──
+    "Data Scientist", "Data Engineer", "Data Analyst", "Data Architect",
+    "Machine Learning Engineer", "MLOps Engineer", "AI Engineer",
+    "IA", "Intelligence Artificielle", "Deep Learning", "NLP",
+    "Computer Vision", "Data Manager", "Chief Data Officer",
+    "Statisticien", "Bio-informaticien", "Data Visualisation",
+    // ── Développement ──
+    "Développeur Python", "Développeur Java", "Développeur JavaScript",
+    "Développeur TypeScript", "Développeur React", "Développeur Angular",
+    "Développeur Vue.js", "Développeur Node.js", "Développeur Full Stack",
+    "Développeur Web", "Développeur Mobile", "Développeur iOS",
+    "Développeur Android", "Développeur Flutter", "Développeur React Native",
+    "Développeur C#", "Développeur .NET", "Développeur Go",
+    "Développeur Rust", "Développeur Ruby", "Développeur PHP",
+    "Développeur Symfony", "Développeur Laravel", "Développeur WordPress",
+    "Développeur Backend", "Développeur Frontend", "Développeur API",
+    "Développeur Microservices", "Développeur SaaS", "Développeur Cloud",
+    // ── DevOps / Cloud ──
+    "DevOps Engineer", "DevSecOps Engineer", "Cloud Engineer",
+    "Cloud Architect", "SRE", "Site Reliability Engineer",
+    "Platform Engineer", "Infrastructure Engineer", "Kubernetes",
+    "Docker", "Terraform", "CI/CD", "GitOps",
+    "AWS", "Azure", "GCP", "Google Cloud Platform",
+    // ── Cybersécurité ──
+    "Cybersécurité", "Pentester", "Security Engineer", "SOC Analyst",
+    "Analyste Cyber", "Consultant Cyber", "ISO 27001",
+    "Ethical Hacker", "Reverse Engineering", "Cryptographie",
+    // ── Réseaux & Systèmes ──
+    "Administrateur Réseau", "Administrateur Système", "Ingénieur Réseau",
+    "Ingénieur Système", "DevOps Réseau", "Technicien Réseau",
+    "Support IT", "IT Manager", "SysAdmin",
+    // ── Produit / Projet / Management ──
+    "Chef de Projet IT", "Product Manager", "Product Owner",
+    "Scrum Master", "Agile Coach", "Delivery Manager",
+    "Technical Project Manager", "IT Project Manager",
+    // ── ERP / CRM / Business ──
+    "Consultant SAP", "Consultant Oracle", "Consultant CRM",
+    "Consultant ERP", "Consultant Salesforce", "Consultant Power BI",
+    "Consultant BI", "Consultant Salesforce Marketing Cloud",
+    "Business Analyst", "Business Intelligence", "BI Developer",
+    "QA Engineer", "Testeur Logiciel", "Automatisation Test",
+    // ── Design / UX ──
+    "UI Designer", "UX Designer", "UX Researcher", "Product Designer",
+    "Web Designer", "Graphiste", "Motion Designer", "Designer UI/UX",
+    "Design System", "Figma", "User Research",
+    // ── Tech général ──
+    "Architecte Logiciel", "Architecte Solution", "Consultant Tech",
+    "Tech Lead", "Lead Developer", "CTO", "VP Engineering",
+    "Stagiaire Informatique", "Alternance Informatique",
+    "Stage Dev", "Stage Data", "Stage Cyber",
+    // ── Télécoms / IoT / Hardware ──
+    "Ingénieur Télécoms", "IoT", "Internet of Things",
+    "Embedded Systems", "Systèmes Embarqués", "FPGA",
+    "Automatisme", "Robotique", "Ingénieur Mécanique",
+    "CAO", "DAO",
+    // ── Jeux vidéo ──
+    "Game Developer", "Game Designer", "Unity Developer",
+    "Unreal Engine", "3D Artist", "Game Programmer",
+    // ── Secteurs spécifiques ──
+    "Fintech", "HealthTech", "EdTech", "GreenTech",
+    "SaaS", "E-commerce", "Logistique", "Supply Chain",
+    // ── Fonctions supports IT ──
+    "Technical Writer", "Developer Advocate", "Customer Success Engineer",
+    "Sales Engineer", "Pre-Sales", "Support Technique",
+];
+
+document.addEventListener('DOMContentLoaded', () => {
+    $('#btn-add-search-term').addEventListener('click', addSearchTerm);
+    initAutocomplete();
+    loadCriteria();
+});
+
+function addSearchTerm(val) {
+    const term = (val || $('#search-term-input').value).trim();
+    if (!term) return;
+    _searchTerms.push(term);
+    $('#search-term-input').value = '';
+    $('#autocomplete-list').style.display = 'none';
+    renderSearchTerms();
+}
+
+function removeSearchTerm(idx) {
+    _searchTerms.splice(idx, 1);
+    renderSearchTerms();
+}
+
+function renderSearchTerms() {
+    const container = $('#search-terms-rows');
+    const empty = $('#search-terms-empty');
+    if (_searchTerms.length === 0) {
+        container.innerHTML = '';
+        empty.style.display = 'block';
+    } else {
+        empty.style.display = 'none';
+        container.innerHTML = _searchTerms.map((t, i) => `
+            <div class="search-term-row">
+                <span class="st-index">${i + 1}</span>
+                <span class="st-text">${escapeHtml(t)}</span>
+                <button class="st-remove" onclick="removeSearchTerm(${i})" title="Supprimer">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+        `).join('');
     }
+}
+
+// ── Autocomplete ──────────────────────────────────────────────────
+function initAutocomplete() {
+    const input = $('#search-term-input');
+    const list = $('#autocomplete-list');
+    if (!input || !list) return;
+
+    // Fermer au clic en dehors
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.autocomplete-container')) {
+            list.style.display = 'none';
+        }
+    });
+
+    input.addEventListener('input', () => {
+        const val = input.value.trim().toLowerCase();
+        if (!val) {
+            list.style.display = 'none';
+            return;
+        }
+        // Chercher les suggestions qui matchent
+        const matches = SEARCH_SUGGESTIONS.filter(s =>
+            s.toLowerCase().includes(val)
+        ).slice(0, 10); // max 10 suggestions
+
+        if (matches.length === 0) {
+            list.style.display = 'none';
+            return;
+        }
+
+        list.innerHTML = matches.map(s =>
+            `<div class="autocomplete-item" onclick="selectSuggestion('${escapeHtml(s)}')">
+                <i class="fa-solid fa-briefcase"></i> ${escapeHtml(s)}
+            </div>`
+        ).join('');
+        list.style.display = 'block';
+    });
+
+    // Enter → ajoute le terme (ou la première suggestion si l'input est vide ? Non, le terme tapé)
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            addSearchTerm();
+        }
+    });
+}
+
+function selectSuggestion(val) {
+    addSearchTerm(val);
+    $('#search-term-input').focus();
+}
+
+async function loadCriteria() {
+    try {
+        const data = await apiGet('/criteria');
+        _searchTerms = data.search_terms || [];
+        renderSearchTerms();
+        if (data.location) $('#criteria-location').value = data.location;
+        if (data.radius_km !== undefined) $('#criteria-radius').value = data.radius_km;
+        if (data.education_levels) {
+            document.querySelectorAll('#criteria-education-checkboxes input[type=checkbox]').forEach(cb => {
+                cb.checked = data.education_levels.includes(cb.value);
+            });
+        }
+        if (data.contract) $('#criteria-contract').value = data.contract;
+        updateCriteriaBadge(data);
+    } catch(e) {
+        console.error('Criteria load:', e);
+    }
+}
+
+async function saveCriteria() {
+    const btn = $('#btn-save-criteria');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+    try {
+        const checkedLevels = [];
+        document.querySelectorAll('#criteria-education-checkboxes input[type=checkbox]:checked').forEach(cb => checkedLevels.push(cb.value));
+        const payload = {
+            search_terms: _searchTerms,
+            location: $('#criteria-location').value.trim(),
+            radius_km: parseInt($('#criteria-radius').value) || 0,
+            education_levels: checkedLevels,
+            contract: $('#criteria-contract').value,
+        };
+        const data = await apiPost('/criteria/save', payload);
+        updateCriteriaBadge(data);
+    } catch(e) {
+        console.error('Save criteria:', e);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Appliquer';
+    }
+}
+
+async function resetCriteria() {
+    try {
+        await fetch(API + '/criteria/reset', { method: 'DELETE' });
+        $('#criteria-location').value = '';
+        $('#criteria-radius').value = '0';
+        document.querySelectorAll('#criteria-education-checkboxes input[type=checkbox]').forEach(cb => cb.checked = false);
+        $('#criteria-contract').value = '';
+        _searchTerms = [];
+        renderSearchTerms();
+        $('#criteria-badge').textContent = 'optionnel';
+        $('#criteria-badge').style.color = 'var(--color-text-muted)';
+    } catch(e) {
+        console.error('Reset criteria:', e);
+    }
+}
+
+function updateCriteriaBadge(data) {
+    const terms = data.search_terms || [];
+    const levels = data.education_levels || [];
+    if (terms.length > 0) {
+        $('#criteria-badge').textContent = terms.length + ' terme(s)';
+        $('#criteria-badge').style.color = 'var(--color-accent)';
+    } else if (levels.length > 0 || data.contract || data.location) {
+        const parts = [];
+        if (levels.length > 0) parts.push(levels.join('/'));
+        if (data.location) parts.push(data.location);
+        $('#criteria-badge').textContent = parts.join(' · ');
+        $('#criteria-badge').style.color = 'var(--color-accent)';
+    } else {
+        $('#criteria-badge').textContent = 'optionnel';
+        $('#criteria-badge').style.color = 'var(--color-text-muted)';
+    }
+}
+
+// ── Profile Builder (drag & drop + chat LLM) ─────────────────────
+let uploadedFileIds = []; // indices of uploaded files attached to next message
+
+document.addEventListener('DOMContentLoaded', () => {
+    initProfileDropZone();
+    initProfileFileInput();
+    initProfileEnterKey();
+    // Also bind initProfileEnterKey in the existing init so
+    // it's set up after DOM ready
+});
+
+function initProfileEnterKey() {
+    const ta = $('#profile-chat-input');
+    if (!ta) return;
+    // Remove old handler to avoid duplicates
+    ta.onkeydown = (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendProfileMessage();
+        }
+    };
+}
+
+function initProfileDropZone() {
+    const dropzone = $('#profile-dropzone');
+    const wrapper = dropzone?.closest('.chat-messages-wrapper');
+    if (!dropzone || !wrapper) return;
+
+    // Also listen on the wrapper (not the whole chat) so input stays usable
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        wrapper.addEventListener(eventName, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+    });
+
+    wrapper.addEventListener('dragenter', () => dropzone.classList.add('active'));
+    wrapper.addEventListener('dragover', () => dropzone.classList.add('active'));
+    wrapper.addEventListener('dragleave', (e) => {
+        if (!wrapper.contains(e.relatedTarget)) {
+            dropzone.classList.remove('active');
+        }
+    });
+    wrapper.addEventListener('drop', (e) => {
+        dropzone.classList.remove('active');
+        collapseDropZone();
+        handleDroppedFiles(e.dataTransfer.files);
+    });
+
+    // Click on dropzone to open file picker
+    dropzone.addEventListener('click', () => {
+        collapseDropZone();
+        $('#profile-file-input').click();
+    });
+}
+
+function initProfileFileInput() {
+    const input = $('#profile-file-input');
+    if (!input) return;
+    input.addEventListener('change', () => {
+        if (input.files.length > 0) {
+            handleDroppedFiles(input.files);
+            input.value = '';
+        }
+    });
+}
+
+async function handleDroppedFiles(fileList) {
+    const dropzone = $('#profile-dropzone');
+    const list = $('#attachments-list');
+    const bar = $('#chat-attachments');
+
+    collapseDropZone();
+
+    for (const file of fileList) {
+        // Show uploading indicator
+        const item = document.createElement('span');
+        item.className = 'attachment-item uploading';
+        item.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${escapeHtml(file.name)}`;
+        list.appendChild(item);
+        bar.style.display = 'flex';
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const r = await fetch(API + '/profile/upload', {
+                method: 'POST',
+                body: formData,
+            });
+            if (!r.ok) throw new Error(await r.text());
+            const data = await r.json();
+
+            // Replace spinner with success
+            item.className = 'attachment-item';
+            item.innerHTML = `
+                <i class="fa-solid fa-file-lines"></i>
+                <span class="att-name">${escapeHtml(data.filename)}</span>
+                <span class="att-size">(${formatBytes(data.size)})</span>
+                <button class="att-remove" onclick="removeAttachment(this, '${data.file_id}')" title="Retirer">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>`;
+            item.dataset.fileId = data.file_id;
+            uploadedFileIds.push(data.file_id);
+        } catch(e) {
+            item.className = 'attachment-item error';
+            item.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(file.name)}: ${escapeHtml(e.message)}`;
+            setTimeout(() => item.remove(), 3000);
+        }
+    }
+
+    if (uploadedFileIds.length === 0) {
+        bar.style.display = 'none';
+    }
+}
+
+function removeAttachment(el, fileId) {
+    uploadedFileIds = uploadedFileIds.filter(id => id !== fileId);
+    el.closest('.attachment-item').remove();
+    if (uploadedFileIds.length === 0) {
+        $('#chat-attachments').style.display = 'none';
+    }
+}
+
+async function sendProfileMessage() {
+    const input = $('#profile-chat-input');
+    const msg = input.value.trim();
+    if (!msg && uploadedFileIds.length === 0) return;
+
+    input.value = '';
+    const btn = $('#btn-send-profile');
+    btn.disabled = true;
+
+    // Add user message to chat
+    addChatMessage('user', msg, uploadedFileIds);
+
+    // Show typing indicator
+    const typingEl = addTypingIndicator();
+
+    try {
+        const r = await fetch(API + '/profile/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                message: msg || 'Analyse les documents joints et mets à jour mon profil.',
+                file_ids: [...uploadedFileIds],
+            }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+
+        // Remove typing indicator
+        typingEl.remove();
+
+        // Add assistant reply
+        addChatMessage('assistant', data.reply);
+
+        // Update profile display
+        if (data.profile && Object.keys(data.profile).length > 0) {
+            updateProfileDisplay(data.profile);
+        }
+
+        // Clear attachments
+        uploadedFileIds = [];
+        const list = $('#attachments-list');
+        if (list) list.innerHTML = '';
+        $('#chat-attachments').style.display = 'none';
+
+        // Collapse dropzone smoothly after first interaction
+        collapseDropZone();
+
+    } catch(e) {
+        typingEl.remove();
+        addChatMessage('assistant', '⚠️ Erreur : ' + e.message, null, true);
+    } finally {
+        btn.disabled = false;
+        input.focus();
+    }
+}
+
+function addChatMessage(role, content, fileIds, isError) {
+    const container = $('#chat-messages');
+    const div = document.createElement('div');
+    div.className = 'chat-msg ' + role + (isError ? ' error' : '');
+
+    const avatarIcon = role === 'user'
+        ? '<i class="fa-solid fa-user"></i>'
+        : '<i class="fa-solid fa-robot"></i>';
+
+    div.innerHTML = `
+        <div class="chat-avatar">${avatarIcon}</div>
+        <div class="chat-bubble">
+            ${formatProfileContent(content)}
+        </div>`;
+
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+function addTypingIndicator() {
+    const container = $('#chat-messages');
+    const div = document.createElement('div');
+    div.className = 'chat-msg assistant typing';
+    div.innerHTML = `
+        <div class="chat-avatar"><i class="fa-solid fa-robot"></i></div>
+        <div class="chat-bubble">
+            <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>
+        </div>`;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+    return div;
+}
+
+function formatProfileContent(text) {
+    if (!text) return '';
+    // Escape HTML
+    let escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Convert code blocks to styled pre
+    escaped = escaped.replace(/```json\n([\s\S]*?)\n```/g,
+        '<pre class="chat-code">$1</pre>');
+    escaped = escaped.replace(/```(\w*)\n([\s\S]*?)\n```/g,
+        '<pre class="chat-code">$2</pre>');
+    // Convert **bold**
+    escaped = escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // Convert line breaks
+    escaped = escaped.replace(/\n/g, '<br>');
+    return escaped;
+}
+
+function updateProfileDisplay(profile) {
+    const area = $('#profile-preview-area');
+    const display = $('#profile-json-display');
+    if (!area || !display) return;
+
+    area.style.display = 'block';
+    display.textContent = JSON.stringify(profile, null, 2);
+
+    // Show session badge
+    const badge = $('#profile-session-badge');
+    if (badge) badge.textContent = '● Actif';
+}
+
+async function finalizeProfile() {
+    const btn = $('#btn-finalize-profile');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Finalisation...';
+
+    try {
+        const r = await fetch(API + '/profile/build', { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        if (data.profile) {
+            updateProfileDisplay(data.profile);
+            addChatMessage('assistant', '✅ Profil finalisé ! Voici le résultat ci-dessous ⬇️');
+        }
+    } catch(e) {
+        addChatMessage('assistant', '⚠️ Erreur de finalisation : ' + e.message, null, true);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> Finaliser';
+    }
+}
+
+// ── Generate Search Terms from Profile ───────────────────────────
+async function generateSearchTerms() {
+    const btn = $('#btn-generate-terms');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Génération...';
+    try {
+        const r = await fetch(API + '/profile/generate-terms', { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        addChatMessage('assistant', `✨ Termes de recherche générés : **${data.terms.join(', ')}**\n\nIls ont été ajoutés aux critères de recherche.`);
+        // Recharger les critères pour afficher les nouveaux termes
+        _searchTerms = data.terms || [];
+        renderSearchTerms();
+        saveCriteriaSilent(data.terms);
+    } catch(e) {
+        addChatMessage('assistant', '⚠️ Erreur génération termes : ' + e.message, null, true);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> Termes';
+    }
+}
+
+async function saveCriteriaSilent(terms) {
+    // Sauvegarde silencieuse des critères avec les nouveaux termes
+    try {
+        const checkedLevels = [];
+        document.querySelectorAll('#criteria-education-checkboxes input[type=checkbox]:checked').forEach(cb => checkedLevels.push(cb.value));
+        await fetch(API + '/criteria/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                search_terms: terms,
+                location: document.getElementById('criteria-location')?.value || '',
+                radius_km: parseInt(document.getElementById('criteria-radius')?.value) || 0,
+                education_levels: checkedLevels,
+                contract: document.getElementById('criteria-contract')?.value || '',
+            }),
+        });
+    } catch(e) {
+        console.error('Silent save criteria:', e);
+    }
+}
+
+async function resetProfile() {
+    if (!confirm('Réinitialiser tout le profil et la conversation ?')) return;
+    try {
+        await fetch(API + '/profile/reset', { method: 'DELETE' });
+        // Clear UI
+        $('#chat-messages').innerHTML = `
+            <div class="chat-msg assistant">
+                <div class="chat-avatar"><i class="fa-solid fa-robot"></i></div>
+                <div class="chat-bubble">
+                    <p>👋 Bonjour ! Je suis ton assistant de profil. Écris ton parcours ci-dessous, ou glisse-dépose ton CV, ta lettre de motivation… Je construirai ton profil candidat étape par étape.</p>
+                </div>
+            </div>`;
+        $('#profile-preview-area').style.display = 'none';
+        // Restore dropzone
+        const dz = $('#profile-dropzone');
+        if (dz) {
+            dz.classList.remove('collapsed');
+            dz.style.display = 'flex';
+        }
+        $('#chat-attachments').style.display = 'none';
+        $('#attachments-list').innerHTML = '';
+        uploadedFileIds = [];
+        $('#profile-session-badge').textContent = '—';
+    } catch(e) {
+        console.error('Reset error:', e);
+    }
+}
+
+function copyProfileJSON() {
+    const display = $('#profile-json-display');
+    if (!display || !display.textContent) return;
+    navigator.clipboard.writeText(display.textContent).then(() => {
+        // brief flash
+        const btn = document.querySelector('#profile-preview-area .btn-outline');
+        if (btn) {
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<i class="fa-solid fa-check"></i> Copié !';
+            setTimeout(() => { btn.innerHTML = orig; }, 1500);
+        }
+    });
+}
+
+function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + ' o';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' Ko';
+    return (bytes / 1048576).toFixed(1) + ' Mo';
+}
+
+// ── Drop zone collapse (animated) ─────────────────────────────────
+function collapseDropZone() {
+    const dropzone = $('#profile-dropzone');
+    if (!dropzone || dropzone.classList.contains('collapsed')) return;
+    dropzone.classList.add('collapsed');
+    // After transition ends, hide it so messages are fully clickable
+    setTimeout(() => {
+        if (dropzone.classList.contains('collapsed')) {
+            dropzone.style.display = 'none';
+        }
+    }, 400);
 }
 
 // ── Polling ────────────────────────────────────────────────────────

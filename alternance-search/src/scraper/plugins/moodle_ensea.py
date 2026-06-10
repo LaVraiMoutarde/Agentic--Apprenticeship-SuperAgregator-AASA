@@ -121,6 +121,7 @@ class MoodleEnseaScraper(BaseScraper):
         *,
         location: str = "",
         max_pages: int = 5,
+        criteria=None,
     ) -> ScraperResult:
         """Exécute le scraping de la base de données Moodle.
 

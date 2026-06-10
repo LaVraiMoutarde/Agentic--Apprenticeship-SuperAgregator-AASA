@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alternance Search — Base de données</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        .db-page { padding: 20px; max-width: 1400px; margin: 0 auto; }
+        .db-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; gap: 16px; flex-wrap: wrap; }
+        .db-header h1 { font-size: 22px; font-weight: 700; color: var(--color-primary); display: flex; align-items: center; gap: 10px; }
+        .db-header h1 i { margin-right: 4px; }
+        .db-stats { font-size: 13px; color: var(--color-text-muted); background: var(--color-surface); padding: 8px 14px; border-radius: var(--radius-sm); border: 1px solid var(--color-border); }
+        .db-stats strong { color: var(--color-text); }
+        .db-search { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+        .db-search input { flex: 1; min-width: 200px; }
+        .db-search select { width: 150px; }
+        .db-table-wrap { overflow-x: auto; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+        .db-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .db-table th { padding: 10px 14px; text-align: left; font-weight: 600; color: var(--color-text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; background: #f8fafc; border-bottom: 2px solid var(--color-border); white-space: nowrap; }
+        .db-table td { padding: 10px 14px; border-bottom: 1px solid var(--color-border); color: var(--color-text); max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .db-table tr:hover td { background: #f8fafc; }
+        .db-table tr:last-child td { border-bottom: none; }
+        .db-empty { text-align: center; padding: 60px 20px; color: var(--color-text-muted); }
+        .db-empty i { font-size: 40px; margin-bottom: 12px; display: block; }
+        .db-pagination { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 16px; }
+        .db-pagination .btn:disabled { opacity: 0.4; }
+        .db-pagination span { font-size: 13px; color: var(--color-text-muted); }
+        .tag-source { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 9999px; text-transform: uppercase; letter-spacing: 0.3px; }
+        .cell-title a { color: var(--color-primary); text-decoration: none; font-weight: 500; }
+        .cell-title a:hover { text-decoration: underline; }
+        .btn-back { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font-size: 13px; cursor: pointer; text-decoration: none; }
+        .btn-back:hover { border-color: var(--color-primary); color: var(--color-primary); }
+    </style>
+</head>
+<body>
+    <div class="db-page">
+        <div class="db-header">
+            <div style="display:flex;align-items:center;gap:12px;">
+                <a href="/" class="btn-back"><i class="fa-solid fa-arrow-left"></i> Dashboard</a>
+                <h1><i class="fa-solid fa-database"></i> Base de données</h1>
+            </div>
+            <span class="db-stats" id="db-stats">Offres : <strong id="db-total">0</strong></span>
+        </div>
+
+        <div class="db-search">
+            <input id="db-search-input" type="text" class="input" placeholder="Rechercher par titre, entreprise, localisation..." onkeydown="if(event.key==='Enter')searchDB()">
+            <select id="db-source-select" class="input" style="width:140px;" onchange="searchDB()">
+                <option value="">Toutes sources</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="searchDB()"><i class="fa-solid fa-search"></i> Rechercher</button>
+        </div>
+
+        <div class="db-table-wrap">
+            <table class="db-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Titre</th>
+                        <th>Entreprise</th>
+                        <th>Localisation</th>
+                        <th>Contrat</th>
+                        <th>Niveau</th>
+                        <th>Source</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
+                <tbody id="db-tbody">
+                    <tr><td colspan="8" class="db-empty"><i class="fa-solid fa-database"></i>Chargement...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="db-pagination">
+            <button class="btn btn-outline btn-sm" id="db-prev" onclick="prevPage()" disabled><i class="fa-solid fa-chevron-left"></i> Précédent</button>
+            <span id="db-page-info">Page 1</span>
+            <button class="btn btn-outline btn-sm" id="db-next" onclick="nextPage()">Suivant <i class="fa-solid fa-chevron-right"></i></button>
+        </div>
+    </div>
+
+    <script>
+        const API = '/api';
+        let currentPage = 0;
+        const PAGE_SIZE = 50;
+        let totalOffers = 0;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadSources();
+            searchDB();
+        });
+
+        async function loadSources() {
+            try {
+                const r = await fetch(API + '/results/sources');
+                const data = await r.json();
+                const sel = document.getElementById('db-source-select');
+                (data.sources || []).forEach(s => {
+                    const opt = document.createElement('option');
+                    opt.value = s;
+                    opt.textContent = s;
+                    sel.appendChild(opt);
+                });
+            } catch(e) { console.error(e); }
+        }
+
+        async function searchDB() {
+            currentPage = 0;
+            await fetchPage();
+        }
+
+        async function fetchPage() {
+            const q = document.getElementById('db-search-input').value.trim();
+            const src = document.getElementById('db-source-select').value;
+            const params = new URLSearchParams({
+                q, source: src,
+                limit: PAGE_SIZE, offset: currentPage * PAGE_SIZE
+            });
+            try {
+                const r = await fetch(API + '/results/search?' + params);
+                const data = await r.json();
+                renderResults(data.offers || []);
+                totalOffers = data.total || 0;
+                document.getElementById('db-total').textContent = totalOffers;
+                updatePagination();
+            } catch(e) { console.error(e); }
+        }
+
+        function renderResults(offers) {
+            const tbody = document.getElementById('db-tbody');
+            if (!offers.length) {
+                tbody.innerHTML = '<tr><td colspan="8" class="db-empty"><i class="fa-solid fa-database"></i>Aucune offre trouvée.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = offers.map((o, i) => {
+                const n = currentPage * PAGE_SIZE + i + 1;
+                const url = o.url || '#';
+                return '<tr>' +
+                    `<td style="color:var(--color-text-muted);font-size:11px;">${n}</td>` +
+                    `<td class="cell-title"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(o.title || '—')}</a></td>` +
+                    `<td>${escapeHtml(o.company || '—')}</td>` +
+                    `<td>${escapeHtml(o.location || '—')}</td>` +
+                    `<td>${escapeHtml(o.contract_type || '—')}</td>` +
+                    `<td>${escapeHtml(o.required_level || '—')}</td>` +
+                    `<td><span class="tag-source" style="background:#eef2ff;color:var(--color-primary);">${escapeHtml(o.source || '—')}</span></td>` +
+                    `<td style="font-size:11px;color:var(--color-text-muted);">${escapeHtml(o.scraped_date ? o.scraped_date.slice(0,10) : '—')}</td>` +
+                    '</tr>';
+            }).join('');
+        }
+
+        function updatePagination() {
+            const totalPages = Math.ceil(totalOffers / PAGE_SIZE);
+            document.getElementById('db-page-info').textContent = `Page ${currentPage + 1} / ${Math.max(1, totalPages)}`;
+            document.getElementById('db-prev').disabled = currentPage <= 0;
+            document.getElementById('db-next').disabled = currentPage + 1 >= totalPages;
+        }
+
+        function prevPage() { if (currentPage > 0) { currentPage--; fetchPage(); } }
+        function nextPage() { currentPage++; fetchPage(); }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>

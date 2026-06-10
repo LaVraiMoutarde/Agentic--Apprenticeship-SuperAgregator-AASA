@@ -1,0 +1,8 @@
+g:\doc\projets\Agentic--Apprenticeship-SuperAgregator-AASA\turbovec-0.8.1\target\release\deps\rustc_hash-2f70ebc9f3e1126e.d: C:\Users\Administrator\AppData\Local\puccinialin\puccinialin\Cache\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rustc-hash-2.1.2\src\lib.rs C:\Users\Administrator\AppData\Local\puccinialin\puccinialin\Cache\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rustc-hash-2.1.2\src\seeded_state.rs
+
+g:\doc\projets\Agentic--Apprenticeship-SuperAgregator-AASA\turbovec-0.8.1\target\release\deps\librustc_hash-2f70ebc9f3e1126e.rlib: C:\Users\Administrator\AppData\Local\puccinialin\puccinialin\Cache\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rustc-hash-2.1.2\src\lib.rs C:\Users\Administrator\AppData\Local\puccinialin\puccinialin\Cache\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rustc-hash-2.1.2\src\seeded_state.rs
+
+g:\doc\projets\Agentic--Apprenticeship-SuperAgregator-AASA\turbovec-0.8.1\target\release\deps\librustc_hash-2f70ebc9f3e1126e.rmeta: C:\Users\Administrator\AppData\Local\puccinialin\puccinialin\Cache\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rustc-hash-2.1.2\src\lib.rs C:\Users\Administrator\AppData\Local\puccinialin\puccinialin\Cache\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rustc-hash-2.1.2\src\seeded_state.rs
+
+C:\Users\Administrator\AppData\Local\puccinialin\puccinialin\Cache\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rustc-hash-2.1.2\src\lib.rs:
+C:\Users\Administrator\AppData\Local\puccinialin\puccinialin\Cache\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rustc-hash-2.1.2\src\seeded_state.rs:

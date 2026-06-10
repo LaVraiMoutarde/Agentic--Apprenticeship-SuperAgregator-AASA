@@ -121,7 +121,7 @@ class CandidateProfile:
     # ── Formation ──
     current_level: str = ""  # ex: "BAC+2 (BTS SIO)"
     target_level: str = ""  # ex: "BAC+3 (BUT Informatique)"
-    field: str = ""  # ex: "Informatique, développement logiciel"
+    domain: str = ""  # ex: "Informatique, développement logiciel"
 
     # ── Compétences ──
     skills: list[str] = field(default_factory=list)  # ex: ["Python", "SQL", "Git"]
@@ -147,8 +147,8 @@ class CandidateProfile:
             target = f"Recherche : {self.target_level}" if self.target_level else ""
             parts.append(f"📚 Formation : {level} → {target}".strip())
 
-        if self.field:
-            parts.append(f"🎯 Domaine : {self.field}")
+        if self.domain:
+            parts.append(f"🎯 Domaine : {self.domain}")
 
         if self.skills:
             parts.append(f"💻 Compétences techniques : {', '.join(self.skills)}")
@@ -552,7 +552,7 @@ class LLMScorer:
     def _cache_key(self, profile: CandidateProfile, offer: Offer) -> str:
         """Génère une clé de cache déterministe."""
         raw = (
-            f"{profile.current_level}|{profile.target_level}|{profile.field}|"
+            f"{profile.current_level}|{profile.target_level}|{profile.domain}|"
             f"{','.join(sorted(profile.skills))}|"
             f"{offer.source}|{offer.source_id}|{offer.title}"
         )
