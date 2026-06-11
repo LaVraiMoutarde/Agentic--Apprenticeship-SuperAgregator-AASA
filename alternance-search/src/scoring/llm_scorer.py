@@ -198,19 +198,35 @@ RÈGLES STRICTES :
 - Une offre sans description détaillée ne peut pas dépasser 60/100 en global"""
 
 
-def build_offers_context(offers: list[Offer], start_index: int = 0) -> str:
+def build_offers_context(
+    offers: list[Offer],
+    start_index: int = 0,
+    full_texts: dict[int, str] | None = None,
+) -> str:
     """Construit le contexte textuel des offres pour le prompt LLM.
 
     Args:
         offers: Liste d'offres à présenter au LLM.
         start_index: Index de départ pour la numérotation (pour les sub-batchs).
+        full_texts: Dictionnaire optionnel {index_global: texte_complet_page}.
+                    Si fourni, le texte de la page réelle est inclus en complément
+                    de la description tronquée.
 
     Returns:
         Texte formaté décrivant toutes les offres.
     """
+    full_texts = full_texts or {}
     parts: list[str] = []
     for i, offer in enumerate(offers):
         idx = start_index + i
+        desc = offer.description[:1500] if offer.description else 'N/C'
+
+        # Si on a le texte complet de la page, l'ajouter en complément
+        page_text = full_texts.get(idx)
+        page_section = ""
+        if page_text:
+            page_section = f"\nContenu complet de la page :\n{page_text[:10000]}"
+
         parts.append(f"""
 --- Offre #{idx} ---
 Titre : {offer.title or 'N/C'}
@@ -222,7 +238,7 @@ Domaine : {offer.domain or 'N/C'}
 Niveau requis : {offer.required_level or 'N/C'}
 Salaire : {offer.salary_display or 'N/C'}
 URL : {offer.url or 'N/C'}
-Description : {offer.description[:1500] if offer.description else 'N/C'}
+Description : {desc}{page_section}
 ---""")
     return "\n".join(parts)
 
@@ -320,7 +336,10 @@ class LLMScorer:
     # ── TASK 1 : Score d'une offre unique ──
 
     def score_offer_with_llm(
-        self, profile: CandidateProfile, offer: Offer
+        self,
+        profile: CandidateProfile,
+        offer: Offer,
+        full_page_text: str | None = None,
     ) -> LLMScoreBreakdown:
         """Score une offre unique avec le LLM.
 
@@ -331,6 +350,9 @@ class LLMScorer:
         Args:
             profile: Profil du candidat (runtime, pas de données internes).
             offer: L'offre à évaluer.
+            full_page_text: Texte complet de la page web de l'offre (optionnel).
+                            Si fourni, le LLM aura accès au contenu réel de la page
+                            en plus de la description tronquée.
 
         Returns:
             Score LLM complet avec explications, forces, faiblesses, risques.
@@ -342,7 +364,8 @@ class LLMScorer:
 
         # Construire le prompt pour une offre unique
         profile_text = profile.to_prompt_text()
-        offers_context = build_offers_context([offer])
+        full_texts = {0: full_page_text} if full_page_text else None
+        offers_context = build_offers_context([offer], full_texts=full_texts)
         prompt = build_user_prompt(profile_text, offers_context, 1)
 
         # Appeler le LLM

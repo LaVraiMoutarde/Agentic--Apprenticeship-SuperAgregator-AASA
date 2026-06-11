@@ -1,81 +1,39 @@
-<!-- partials/_profile.html — Candidate Profile Builder avec drag-and-drop + chat LLM -->
+<!-- partials/_profile.html — Candidate Profile (Markdown persistant) -->
 <section class="card card-profile">
     <h2 class="card-title">
         <i class="fa-solid fa-user-graduate"></i> Candidate Profile
         <span class="card-badge" id="profile-session-badge">—</span>
     </h2>
 
-    <!-- ── CHAT AREA ─────────────────────────────────────────────── -->
-    <div class="profile-chat" id="profile-chat">
-
-        <!-- Drop zone + messages wrapper (overlay only here) -->
-        <div class="chat-messages-wrapper">
-            <!-- Drop zone overlay (covers messages only) -->
-            <div class="profile-dropzone" id="profile-dropzone">
-                <div class="dropzone-content">
-                    <i class="fa-solid fa-cloud-arrow-up dropzone-icon"></i>
-                    <p class="dropzone-text">Glissez-déposez vos documents ici</p>
-                    <p class="dropzone-hint">CV, lettre de motivation, notes, captures...</p>
-                    <p class="dropzone-formats">PDF · DOCX · TXT · Images</p>
-                </div>
-            </div>
-
-            <!-- Messages area -->
-            <div class="chat-messages" id="chat-messages">
-                <!-- Welcome message -->
-                <div class="chat-msg assistant">
-                    <div class="chat-avatar"><i class="fa-solid fa-robot"></i></div>
-                    <div class="chat-bubble">
-                        <p>👋 Bonjour ! Je suis ton assistant de profil. Écris ton parcours ci-dessous, ou glisse-dépose ton CV, ta lettre de motivation… Je construirai ton profil candidat étape par étape.</p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- File attachments bar -->
-            <div class="chat-attachments" id="chat-attachments" style="display:none;">
-                <span class="attachments-label"><i class="fa-solid fa-paperclip"></i> Fichiers joints :</span>
-                <div class="attachments-list" id="attachments-list"></div>
+    <!-- ══════════════════════════════════════════════════════════════ -->
+    <!-- PROFILE EDITOR — Markdown textarea                            -->
+    <!-- ══════════════════════════════════════════════════════════════ -->
+    <div class="profile-editor" id="profile-editor">
+        <div class="profile-editor-header">
+            <h3><i class="fa-solid fa-pen-to-square"></i> Profil (.md)</h3>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span class="editor-hint">Sauvegarde dans data/profile_candidat.md</span>
+                <button class="btn-reset-link" onclick="resetProfile()" title="Reinitialiser">🗑</button>
             </div>
         </div>
 
-        <!-- Input area (toujours accessible !) -->
-        <div class="chat-input-area">
-            <label class="chat-file-btn" title="Joindre un fichier">
-                <i class="fa-solid fa-paperclip"></i>
-                <input type="file" id="profile-file-input" multiple
-                       accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.gif,.webp"
-                       style="display:none;">
-            </label>
-            <textarea id="profile-chat-input" class="chat-textarea"
-                      rows="1" placeholder="Ex: Je suis en BAC+2 info, je cherche une alternance en Data..."
-                      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendProfileMessage();}"></textarea>
-            <button class="btn btn-primary btn-sm chat-send-btn" id="btn-send-profile"
-                    onclick="sendProfileMessage()">
-                <i class="fa-solid fa-paper-plane"></i>
+        <div class="editor-md-area">
+            <textarea id="edit-profile-md" class="editor-md-textarea"
+                      rows="22" spellcheck="true"
+                      placeholder="# Profil Candidat&#10;&#10;## Poste recherche&#10;...&#10;&#10;Ecris ou colle ton profil ici."></textarea>
+        </div>
+
+        <div class="editor-actions">
+            <button class="btn btn-primary btn-sm" id="btn-apply-manual" onclick="applyManualProfile()">
+                <i class="fa-solid fa-floppy-disk"></i> Appliquer
+            </button>
+            <button class="btn btn-outline btn-sm" id="btn-generate-terms" onclick="generateSearchTerms()"
+                    title="Generer des termes pour les criteres de recherche">
+                <i class="fa-solid fa-wand-magic-sparkles"></i> → Criteres
             </button>
         </div>
     </div>
 
-    <!-- ── PROFILE PREVIEW ────────────────────────────────────────── -->
-    <div class="profile-preview-area" id="profile-preview-area" style="display:none;">
-        <div class="profile-preview-header">
-            <h3><i class="fa-solid fa-id-card"></i> Profil construit</h3>
-            <div class="profile-preview-actions">
-                <button class="btn btn-outline btn-sm" id="btn-generate-terms" onclick="generateSearchTerms()" title="Générer des termes de recherche">
-                    <i class="fa-solid fa-wand-magic-sparkles"></i> Termes
-                </button>
-                <button class="btn btn-outline btn-sm" onclick="copyProfileJSON()" title="Copier JSON">
-                    <i class="fa-solid fa-copy"></i>
-                </button>
-                <button class="btn btn-outline btn-sm" id="btn-finalize-profile" onclick="finalizeProfile()" title="Finaliser avec LLM">
-                    <i class="fa-solid fa-wand-magic-sparkles"></i> Finaliser
-                </button>
-                <button class="btn btn-outline btn-sm" onclick="resetProfile()" title="Réinitialiser">
-                    <i class="fa-solid fa-trash-can"></i>
-                </button>
-            </div>
-        </div>
-        <pre id="profile-json-display" class="json-display"></pre>
-    </div>
 </section>
+
 

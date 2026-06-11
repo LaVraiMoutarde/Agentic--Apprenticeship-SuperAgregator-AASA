@@ -14,13 +14,25 @@ const API = '/api';
 let pollTimer = null;
 let isScraping = false;
 let isScoring = false;
-let sortOrder = 'score'; // 'score' ou 'date'
 
-// ── Sort Toggle ────────────────────────────────────────────────────
-function toggleSort() {
-    sortOrder = sortOrder === 'score' ? 'date' : 'score';
-    document.getElementById('sort-label').textContent = sortOrder === 'score' ? 'Score' : 'Date';
+// ── Results Controls ─────────────────────────────────────────────
+function onResultsTopChange() {
+    const slider = $('#results-top-slider');
+    const label = $('#results-top-value');
+    if (slider && label) {
+        label.textContent = slider.value;
+    }
     loadResults();
+}
+
+function getResultsTop() {
+    const slider = $('#results-top-slider');
+    return slider ? parseInt(slider.value) || 50 : 50;
+}
+
+function getSortMode() {
+    const sel = $('#results-sort-mode');
+    return sel ? sel.value : 'hybride';
 }
 
 // ── Init ───────────────────────────────────────────────────────────
@@ -36,9 +48,16 @@ document.addEventListener('DOMContentLoaded', () => {
     $('#btn-clear-db').addEventListener('click', clearDatabase);
     $('#btn-build-index').addEventListener('click', buildIndex);
 
+    // Init sliders display
+    updateLLMCandidates();
+    onResultsTopChange();
+
     // Check index + feedback status
     checkIndexStatus();
     checkFeedbackStatus();
+
+    // Load favorites count
+    loadFavCount();
 
         // LLM config
         $('#btn-save-llm').addEventListener('click', saveLLMConfig);
@@ -86,11 +105,12 @@ async function loadStatus() {
             txt.textContent = '🟢 Ready';
         }
 
-        // Profile display (only if managed outside the builder)
-        const profDisplay = $('#profile-json-display');
-        if (profDisplay && s.profile && Object.keys(s.profile).length > 0 && !profDisplay.textContent) {
-            profDisplay.textContent = JSON.stringify(s.profile, null, 2);
-            $('#profile-preview-area').style.display = 'block';
+        // Profile display via chat_profile from status
+        if (s.chat_profile && s.chat_profile.has_content) {
+            const ta = document.getElementById('edit-profile-md');
+            if (ta && s.chat_profile.profile_md && !ta.value.trim()) {
+                ta.value = s.chat_profile.profile_md;
+            }
         }
 
         // Jobs
@@ -106,31 +126,158 @@ async function loadStatus() {
 // ── Results ────────────────────────────────────────────────────────
 async function loadResults() {
     try {
-        const data = await apiGet('/results?limit=50&sort=' + sortOrder);
+        const top = getResultsTop();
+        const sortMode = getSortMode();
+        const data = await apiGet(`/results?top=${top}&sort_mode=${sortMode}`);
         const tbody = $('#results-tbody');
-        if (!data || data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="empty-table">Aucun résultat.</td></tr>';
-        } else {
-            tbody.innerHTML = data.map((r, idx) => {
-                const score = r.score || 0;
-                const scoreColor = score >= 0.7 ? 'var(--color-accent)' : score >= 0.4 ? '#d97706' : 'var(--color-text-muted)';
-                const scoreLabel = score > 0 ? (score * 100).toFixed(0) + '%' : '—';
-                return `
-                <tr>
-                    <td class="cell-title">
-                        <a href="${escapeHtml(r.url || '#')}" target="_blank" rel="noopener" onclick="trackClick(${r.id || idx}, '${escapeHtml((r.company || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.source || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.title || '').replace(/'/g, "\\'"))}')">${escapeHtml(r.title)}</a>
-                    </td>
-                    <td>${escapeHtml(r.company)}</td>
-                    <td>${escapeHtml(r.location)}</td>
-                    <td><span class="score-badge" style="background:${scoreColor}20;color:${scoreColor}">${scoreLabel}</span></td>
-                    <td><span class="source-tag source-${escapeHtml(r.source)}">${escapeHtml(r.source)}</span></td>
-                </tr>`;
-            }).join('');
+
+        // Update mode badge
+        const modeBadge = $('#results-mode-badge');
+        if (modeBadge) {
+            const modeLabels = { hybride: '📐 hybride', index: '📏 index', llm: '🧠 LLM', date: '📅 date' };
+            modeBadge.textContent = data.mode ? modeLabels[data.mode] || data.mode : '—';
+            if (data.warning) {
+                modeBadge.textContent += ' ⚠️';
+                modeBadge.title = data.warning;
+            }
         }
-        $('#results-count').textContent = (data && data.length) ? data.length + ' offres' : '0 offre';
+
+        const offers = data.results || [];
+        if (!offers.length) {
+            const msg = data.warning || 'Configurez vos critères et lancez Build Index.';
+            tbody.innerHTML = `<tr><td colspan="7" class="empty-table">${escapeHtml(msg)}</td></tr>`;
+        } else {
+            // Charger les IDs des favoris
+            let favIds = new Set();
+            fetch(API + '/favorites').then(r => r.json()).then(d => {
+                favIds = new Set(d.ids || []);
+                renderResultsWithFavs(offers, sortMode, favIds);
+            }).catch(() => renderResultsWithFavs(offers, sortMode, favIds));
+        }
+        const total = data.total_candidates || data.total_db || offers.length;
+        const modeInfo = data.mode && data.mode !== 'date' ? ` (top ${offers.length} / ${total})` : '';
+        $('#results-count').textContent = `${offers.length} offre${modeInfo}`;
     } catch(e) {
         console.error('Results error:', e);
+        $('#results-tbody').innerHTML = '<tr><td colspan="7" class="empty-table">Erreur de chargement.</td></tr>';
     }
+}
+
+function renderResultsWithFavs(offers, sortMode, favIds) {
+    const tbody = $('#results-tbody');
+    tbody.innerHTML = offers.map((r, idx) => {
+        // Choisir le score selon le mode
+        let displayScore, scoreColor, scoreIcon, scoreLabel;
+        if (sortMode === 'date') {
+            displayScore = null;
+            scoreLabel = '—';
+            scoreColor = 'var(--color-text-muted)';
+        } else {
+            displayScore = r.hybrid_score || r.final_score || r.embedding_score;
+            const pct = Math.round(displayScore * 100);
+            if (sortMode === 'llm' && r.llm_score > 0) {
+                scoreIcon = 'fa-brain';
+                scoreColor = r.llm_score >= 0.7 ? '#22c55e' : r.llm_score >= 0.4 ? '#f59e0b' : '#ef4444';
+                scoreLabel = `<i class="fa-solid ${scoreIcon}" style="font-size:10px" title="LLM"></i> ${pct}%`;
+            } else if (sortMode === 'index' || !r.llm_score || r.llm_score === 0) {
+                scoreIcon = 'fa-vector-square';
+                scoreColor = displayScore >= 0.7 ? '#3b82f6' : displayScore >= 0.4 ? '#6366f1' : '#8b9cf7';
+                scoreLabel = `<i class="fa-solid ${scoreIcon}" style="font-size:10px" title="Embedding"></i> ${pct}%`;
+            } else {
+                scoreIcon = 'fa-brain';
+                scoreColor = displayScore >= 0.7 ? '#22c55e' : displayScore >= 0.4 ? '#f59e0b' : '#ef4444';
+                scoreLabel = `<i class="fa-solid ${scoreIcon}" style="font-size:10px" title="Hybride"></i> ${pct}%`;
+            }
+        }
+
+        const isFav = favIds.has(r.id);
+        const favIcon = isFav
+            ? '<i class="fa-solid fa-star" style="color:#f59e0b;font-size:14px"></i>'
+            : '<i class="fa-regular fa-star" style="color:#94a3b8;font-size:14px"></i>';
+        const favTitle = isFav ? 'Retirer des favoris' : 'Ajouter aux favoris';
+
+        const reviewIcon = r.has_review
+            ? '<i class="fa-solid fa-robot" style="color:#22c55e;font-size:12px" title="Analyse LLM disponible"></i>'
+            : '<i class="fa-solid fa-robot" style="color:#94a3b8;font-size:12px" title="Demander une analyse LLM"></i>';
+
+        return `
+        <tr>
+            <td><button class="fav-btn" onclick="toggleFavorite(${r.id}, '${escapeHtml((r.title || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.company || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.location || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.source || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.url || '').replace(/'/g, "\\'"))}')" title="${favTitle}">${favIcon}</button></td>
+            <td class="cell-title">
+                <a href="${escapeHtml(r.url || '#')}" target="_blank" rel="noopener" onclick="trackClick(${r.id || idx}, '${escapeHtml((r.company || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.source || '').replace(/'/g, "\\'"))}', '${escapeHtml((r.title || '').replace(/'/g, "\\'"))}')">${escapeHtml(r.title)}</a>
+            </td>
+            <td>${escapeHtml(r.company)}</td>
+            <td>${escapeHtml(r.location)}</td>
+            <td><span class="score-badge" style="background:${scoreColor}20;color:${scoreColor}">${scoreLabel}</span></td>
+            <td><span class="source-tag source-${escapeHtml(r.source)}">${escapeHtml(r.source)}</span></td>
+            <td><button class="review-btn" onclick="reviewOffer(${r.id})">${reviewIcon}</button></td>
+        </tr>`;
+    }).join('');
+}
+
+// ── Review LLM (single offer) ─────────────────────────────────────
+let reviewLoading = {};
+
+async function reviewOffer(offerId) {
+    if (reviewLoading[offerId]) return;
+    reviewLoading[offerId] = true;
+
+    const modal = $('#review-modal');
+    const body = $('#review-body');
+    modal.style.display = 'flex';
+    body.innerHTML = '<div style="text-align:center;padding:40px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color:var(--color-primary)"></i><p style="margin-top:12px;">Analyse LLM en cours...</p></div>';
+
+    try {
+        const r = await fetch(API + '/llm/review/' + offerId, { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        const rev = data.review;
+        body.innerHTML = buildReviewHTML(rev, data.cached);
+        // Recharger les résultats pour mettre à jour l'icône (has_review)
+        loadResults();
+    } catch(e) {
+        body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--color-danger);"><i class="fa-solid fa-triangle-exclamation fa-2x"></i><p style="margin-top:12px;">Erreur: ' + escapeHtml(e.message) + '</p></div>';
+    } finally {
+        reviewLoading[offerId] = false;
+    }
+}
+
+function buildReviewHTML(rev, cached) {
+    const cachedBadge = cached ? '<span style="font-size:11px;background:#dcfce7;color:#16a34a;padding:2px 8px;border-radius:9999px;">en cache</span>' : '';
+    const riskColors = { stack: '#3b82f6', entreprise: '#f59e0b', mission: '#8b5cf6', localisation: '#ec4899', contrat: '#ef4444' };
+    const riskIcons = { stack: '🛠', entreprise: '🏢', mission: '🎯', localisation: '📍', contrat: '📝' };
+
+    return `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <h3 style="margin:0;">🧠 Analyse LLM ${cachedBadge}</h3>
+        </div>
+        <div class="review-scores">
+            <div class="review-score-card">
+                <div class="review-score-value">${rev.global_score}</div>
+                <div class="review-score-label">Global</div>
+            </div>
+            <div class="review-score-card">
+                <div class="review-score-value">${rev.technical_score}</div>
+                <div class="review-score-label">Technique</div>
+            </div>
+            <div class="review-score-card">
+                <div class="review-score-value">${rev.profile_adequacy_score}</div>
+                <div class="review-score-label">Adéquation</div>
+            </div>
+        </div>
+        ${rev.explanation ? `<div class="review-section"><h4>💬 Explication</h4><p>${escapeHtml(rev.explanation)}</p></div>` : ''}
+        ${(rev.strengths || []).length ? `<div class="review-section"><h4>✅ Forces</h4><ul>${rev.strengths.map(s => '<li>' + escapeHtml(s) + '</li>').join('')}</ul></div>` : ''}
+        ${(rev.weaknesses || []).length ? `<div class="review-section"><h4>⚠️ Faiblesses</h4><ul>${rev.weaknesses.map(w => '<li>' + escapeHtml(w) + '</li>').join('')}</ul></div>` : ''}
+        ${(rev.risks || []).length ? `<div class="review-section"><h4>⚡ Risques</h4>${rev.risks.map(r => {
+            const color = riskColors[r.type] || '#94a3b8';
+            const icon = riskIcons[r.type] || '⚠️';
+            return `<div class="review-risk" style="border-left:3px solid ${color}"><span>${icon}</span> <strong>${escapeHtml(r.type)}</strong> — ${escapeHtml(r.detail)}</div>`;
+        }).join('')}</div>` : ''}
+    `;
+}
+
+function closeReview() {
+    $('#review-modal').style.display = 'none';
 }
 
 // ── Scrape ─────────────────────────────────────────────────────────
@@ -159,6 +306,18 @@ async function runScrape() {
 }
 
 // ── LLM Scoring ────────────────────────────────────────────────────
+// ── LLM Candidates Slider ────────────────────────────────────────
+function updateLLMCandidates() {
+    const slider = $('#llm-candidates-slider');
+    const label = $('#llm-candidates-value');
+    if (slider && label) {
+        label.textContent = slider.value;
+        // Coloration : vert=peu risqué, orange=moyen, rouge=risqué
+        const v = parseInt(slider.value);
+        label.style.color = v <= 50 ? '#22c55e' : v <= 100 ? '#f59e0b' : '#ef4444';
+    }
+}
+
 async function runLLM() {
     if (isScoring) return;
     isScoring = true;
@@ -166,8 +325,10 @@ async function runLLM() {
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Scoring...';
 
+    const maxCandidates = parseInt($('#llm-candidates-slider').value) || 50;
+
     try {
-        const r = await apiPost('/llm/run', {});
+        const r = await apiPost('/llm/run', { max_candidates: maxCandidates });
         $('#log-text').textContent = 'LLM Scoring démarré (job: ' + r.job_id + ')\n';
         pollJobUntilDone(r.job_id, 'llm', () => {
             isScoring = false;
@@ -195,6 +356,66 @@ async function downloadExcel() {
             btn.disabled = false;
             btn.innerHTML = '<i class="fa-solid fa-file-excel"></i> Export Excel';
         }, 1500);
+    }
+}
+
+// ── Favorites ────────────────────────────────────────────────────────
+let _favoriteIds = new Set();
+
+async function toggleFavorite(id, title, company, location, source, url) {
+    try {
+        const r = await fetch(API + '/favorites/toggle', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ id, title, company, location, source, url }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        if (data.favorite) {
+            _favoriteIds.add(id);
+        } else {
+            _favoriteIds.delete(id);
+        }
+        updateFavCount(data.count);
+        loadResults();
+    } catch(e) {
+        console.error('Toggle favorite error:', e);
+    }
+}
+
+async function exportFavorites() {
+    const countEl = $('#favorites-count');
+    const originalText = countEl ? countEl.textContent : '';
+    try {
+        // Vérifier s'il y a des favoris
+        const r = await fetch(API + '/favorites');
+        const data = await r.json();
+        if (data.count === 0) {
+            alert('Aucun favori à exporter. Ajoutez d\'abord des offres aux favoris en cliquant sur l\'icône étoile ⭐.');
+            return;
+        }
+        window.open(API + '/favorites/export', '_blank');
+    } catch(e) {
+        console.error('Export favorites error:', e);
+        alert('Erreur lors de l\'export des favoris.');
+    }
+}
+
+async function loadFavCount() {
+    try {
+        const r = await fetch(API + '/favorites');
+        const data = await r.json();
+        updateFavCount(data.count);
+        _favoriteIds = new Set(data.ids || []);
+    } catch(e) {
+        console.error('Load favorites count error:', e);
+    }
+}
+
+function updateFavCount(count) {
+    const el = $('#favorites-count');
+    if (el) {
+        el.textContent = count + ' favori' + (count > 1 ? 's' : '');
     }
 }
 
@@ -362,11 +583,13 @@ function addSearchTerm(val) {
     $('#search-term-input').value = '';
     $('#autocomplete-list').style.display = 'none';
     renderSearchTerms();
+    saveCriteriaSilent(_searchTerms);  // ← persistence immédiate
 }
 
 function removeSearchTerm(idx) {
     _searchTerms.splice(idx, 1);
     renderSearchTerms();
+    saveCriteriaSilent(_searchTerms);  // ← persistence immédiate
 }
 
 function renderSearchTerms() {
@@ -517,289 +740,128 @@ function updateCriteriaBadge(data) {
     }
 }
 
-// ── Profile Builder (drag & drop + chat LLM) ─────────────────────
-let uploadedFileIds = []; // indices of uploaded files attached to next message
+// ── Profile Editor (Markdown persistant, data/profile_candidat.md) ──
 
+const DEFAULT_PROFILE_MD = `# Profil Candidat
+
+## Poste recherche
+(a remplir)
+
+## Competences techniques
+- 
+
+## Niveau d'etudes
+(a remplir)
+
+## Formation
+- 
+
+## Experience
+- 
+
+## Localisation souhaitee
+(a remplir)
+
+## Contrat
+(a remplir)
+
+## Langues
+- 
+
+## Soft skills
+- 
+
+## Resume
+(a remplir)
+`;
+
+// ── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-    initProfileDropZone();
-    initProfileFileInput();
-    initProfileEnterKey();
-    // Also bind initProfileEnterKey in the existing init so
-    // it's set up after DOM ready
+    loadCurrentProfile();
 });
 
-function initProfileEnterKey() {
-    const ta = $('#profile-chat-input');
-    if (!ta) return;
-    // Remove old handler to avoid duplicates
-    ta.onkeydown = (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendProfileMessage();
-        }
-    };
-}
+// ── Profile functions ────────────────────────────────────────────────
 
-function initProfileDropZone() {
-    const dropzone = $('#profile-dropzone');
-    const wrapper = dropzone?.closest('.chat-messages-wrapper');
-    if (!dropzone || !wrapper) return;
-
-    // Also listen on the wrapper (not the whole chat) so input stays usable
-    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-        wrapper.addEventListener(eventName, (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-        });
-    });
-
-    wrapper.addEventListener('dragenter', () => dropzone.classList.add('active'));
-    wrapper.addEventListener('dragover', () => dropzone.classList.add('active'));
-    wrapper.addEventListener('dragleave', (e) => {
-        if (!wrapper.contains(e.relatedTarget)) {
-            dropzone.classList.remove('active');
-        }
-    });
-    wrapper.addEventListener('drop', (e) => {
-        dropzone.classList.remove('active');
-        collapseDropZone();
-        handleDroppedFiles(e.dataTransfer.files);
-    });
-
-    // Click on dropzone to open file picker
-    dropzone.addEventListener('click', () => {
-        collapseDropZone();
-        $('#profile-file-input').click();
-    });
-}
-
-function initProfileFileInput() {
-    const input = $('#profile-file-input');
-    if (!input) return;
-    input.addEventListener('change', () => {
-        if (input.files.length > 0) {
-            handleDroppedFiles(input.files);
-            input.value = '';
-        }
-    });
-}
-
-async function handleDroppedFiles(fileList) {
-    const dropzone = $('#profile-dropzone');
-    const list = $('#attachments-list');
-    const bar = $('#chat-attachments');
-
-    collapseDropZone();
-
-    for (const file of fileList) {
-        // Show uploading indicator
-        const item = document.createElement('span');
-        item.className = 'attachment-item uploading';
-        item.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${escapeHtml(file.name)}`;
-        list.appendChild(item);
-        bar.style.display = 'flex';
-
-        try {
-            const formData = new FormData();
-            formData.append('file', file);
-            const r = await fetch(API + '/profile/upload', {
-                method: 'POST',
-                body: formData,
-            });
-            if (!r.ok) throw new Error(await r.text());
-            const data = await r.json();
-
-            // Replace spinner with success
-            item.className = 'attachment-item';
-            item.innerHTML = `
-                <i class="fa-solid fa-file-lines"></i>
-                <span class="att-name">${escapeHtml(data.filename)}</span>
-                <span class="att-size">(${formatBytes(data.size)})</span>
-                <button class="att-remove" onclick="removeAttachment(this, '${data.file_id}')" title="Retirer">
-                    <i class="fa-solid fa-xmark"></i>
-                </button>`;
-            item.dataset.fileId = data.file_id;
-            uploadedFileIds.push(data.file_id);
-        } catch(e) {
-            item.className = 'attachment-item error';
-            item.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(file.name)}: ${escapeHtml(e.message)}`;
-            setTimeout(() => item.remove(), 3000);
-        }
-    }
-
-    if (uploadedFileIds.length === 0) {
-        bar.style.display = 'none';
-    }
-}
-
-function removeAttachment(el, fileId) {
-    uploadedFileIds = uploadedFileIds.filter(id => id !== fileId);
-    el.closest('.attachment-item').remove();
-    if (uploadedFileIds.length === 0) {
-        $('#chat-attachments').style.display = 'none';
-    }
-}
-
-async function sendProfileMessage() {
-    const input = $('#profile-chat-input');
-    const msg = input.value.trim();
-    if (!msg && uploadedFileIds.length === 0) return;
-
-    input.value = '';
-    const btn = $('#btn-send-profile');
-    btn.disabled = true;
-
-    // Add user message to chat
-    addChatMessage('user', msg, uploadedFileIds);
-
-    // Show typing indicator
-    const typingEl = addTypingIndicator();
-
-    try {
-        const r = await fetch(API + '/profile/chat', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                message: msg || 'Analyse les documents joints et mets à jour mon profil.',
-                file_ids: [...uploadedFileIds],
-            }),
-        });
-        if (!r.ok) throw new Error(await r.text());
-        const data = await r.json();
-
-        // Remove typing indicator
-        typingEl.remove();
-
-        // Add assistant reply
-        addChatMessage('assistant', data.reply);
-
-        // Update profile display
-        if (data.profile && Object.keys(data.profile).length > 0) {
-            updateProfileDisplay(data.profile);
-        }
-
-        // Clear attachments
-        uploadedFileIds = [];
-        const list = $('#attachments-list');
-        if (list) list.innerHTML = '';
-        $('#chat-attachments').style.display = 'none';
-
-        // Collapse dropzone smoothly after first interaction
-        collapseDropZone();
-
-    } catch(e) {
-        typingEl.remove();
-        addChatMessage('assistant', '⚠️ Erreur : ' + e.message, null, true);
-    } finally {
-        btn.disabled = false;
-        input.focus();
-    }
-}
-
-function addChatMessage(role, content, fileIds, isError) {
-    const container = $('#chat-messages');
-    const div = document.createElement('div');
-    div.className = 'chat-msg ' + role + (isError ? ' error' : '');
-
-    const avatarIcon = role === 'user'
-        ? '<i class="fa-solid fa-user"></i>'
-        : '<i class="fa-solid fa-robot"></i>';
-
-    div.innerHTML = `
-        <div class="chat-avatar">${avatarIcon}</div>
-        <div class="chat-bubble">
-            ${formatProfileContent(content)}
-        </div>`;
-
-    container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
-}
-
-function addTypingIndicator() {
-    const container = $('#chat-messages');
-    const div = document.createElement('div');
-    div.className = 'chat-msg assistant typing';
-    div.innerHTML = `
-        <div class="chat-avatar"><i class="fa-solid fa-robot"></i></div>
-        <div class="chat-bubble">
-            <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>
-        </div>`;
-    container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
-    return div;
-}
-
-function formatProfileContent(text) {
-    if (!text) return '';
-    // Escape HTML
-    let escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    // Convert code blocks to styled pre
-    escaped = escaped.replace(/```json\n([\s\S]*?)\n```/g,
-        '<pre class="chat-code">$1</pre>');
-    escaped = escaped.replace(/```(\w*)\n([\s\S]*?)\n```/g,
-        '<pre class="chat-code">$2</pre>');
-    // Convert **bold**
-    escaped = escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    // Convert line breaks
-    escaped = escaped.replace(/\n/g, '<br>');
-    return escaped;
-}
-
-function updateProfileDisplay(profile) {
-    const area = $('#profile-preview-area');
-    const display = $('#profile-json-display');
-    if (!area || !display) return;
-
-    area.style.display = 'block';
-    display.textContent = JSON.stringify(profile, null, 2);
-
-    // Show session badge
+function updateProfileDisplay(profileMd) {
+    const ta = document.getElementById('edit-profile-md');
+    if (ta) ta.value = profileMd || '';
     const badge = $('#profile-session-badge');
     if (badge) badge.textContent = '● Actif';
 }
 
-async function finalizeProfile() {
-    const btn = $('#btn-finalize-profile');
+async function applyManualProfile() {
+    const btn = $('#btn-apply-manual');
     if (!btn) return;
+    const ta = document.getElementById('edit-profile-md');
+    if (!ta) return;
+    const profileMd = ta.value;
+
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Finalisation...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
 
     try {
-        const r = await fetch(API + '/profile/build', { method: 'POST' });
+        const r = await fetch(API + '/profile/manual', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ profile_md: profileMd }),
+        });
         if (!r.ok) throw new Error(await r.text());
-        const data = await r.json();
-        if (data.profile) {
-            updateProfileDisplay(data.profile);
-            addChatMessage('assistant', '✅ Profil finalisé ! Voici le résultat ci-dessous ⬇️');
-        }
+        const badge = $('#profile-session-badge');
+        if (badge) badge.textContent = '● Sauvegarde';
     } catch(e) {
-        addChatMessage('assistant', '⚠️ Erreur de finalisation : ' + e.message, null, true);
+        alert('Erreur sauvegarde : ' + e.message);
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> Finaliser';
+        btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Appliquer';
     }
 }
 
-// ── Generate Search Terms from Profile ───────────────────────────
+async function loadCurrentProfile() {
+    try {
+        const r = await fetch(API + '/profile/current');
+        if (!r.ok) return;
+        const data = await r.json();
+        if (data.profile_md && data.profile_md.trim()) {
+            const ta = document.getElementById('edit-profile-md');
+            if (ta) ta.value = data.profile_md;
+            const badge = $('#profile-session-badge');
+            if (badge && data.has_content) badge.textContent = '● Actif';
+        }
+    } catch(e) {
+        console.error('[Profile] Load error:', e);
+    }
+}
+
+async function resetProfile() {
+    if (!confirm('Reinitialiser le profil ?')) return;
+    try {
+        await fetch(API + '/profile/reset', { method: 'DELETE' });
+        const ta = document.getElementById('edit-profile-md');
+        if (ta) ta.value = DEFAULT_PROFILE_MD;
+        $('#profile-session-badge').textContent = '—';
+    } catch(e) {
+        console.error('Reset error:', e);
+    }
+}
+
 async function generateSearchTerms() {
     const btn = $('#btn-generate-terms');
     if (!btn) return;
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Génération...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
     try {
         const r = await fetch(API + '/profile/generate-terms', { method: 'POST' });
         if (!r.ok) throw new Error(await r.text());
         const data = await r.json();
-        addChatMessage('assistant', `✨ Termes de recherche générés : **${data.terms.join(', ')}**\n\nIls ont été ajoutés aux critères de recherche.`);
-        // Recharger les critères pour afficher les nouveaux termes
         _searchTerms = data.terms || [];
         renderSearchTerms();
         saveCriteriaSilent(data.terms);
+        alert('✨ ' + data.count + ' termes generes et ajoutes aux criteres !');
     } catch(e) {
-        addChatMessage('assistant', '⚠️ Erreur génération termes : ' + e.message, null, true);
+        alert('Erreur generation : ' + e.message);
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> Termes';
+        btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> → Criteres';
     }
 }
 
@@ -822,67 +884,6 @@ async function saveCriteriaSilent(terms) {
     } catch(e) {
         console.error('Silent save criteria:', e);
     }
-}
-
-async function resetProfile() {
-    if (!confirm('Réinitialiser tout le profil et la conversation ?')) return;
-    try {
-        await fetch(API + '/profile/reset', { method: 'DELETE' });
-        // Clear UI
-        $('#chat-messages').innerHTML = `
-            <div class="chat-msg assistant">
-                <div class="chat-avatar"><i class="fa-solid fa-robot"></i></div>
-                <div class="chat-bubble">
-                    <p>👋 Bonjour ! Je suis ton assistant de profil. Écris ton parcours ci-dessous, ou glisse-dépose ton CV, ta lettre de motivation… Je construirai ton profil candidat étape par étape.</p>
-                </div>
-            </div>`;
-        $('#profile-preview-area').style.display = 'none';
-        // Restore dropzone
-        const dz = $('#profile-dropzone');
-        if (dz) {
-            dz.classList.remove('collapsed');
-            dz.style.display = 'flex';
-        }
-        $('#chat-attachments').style.display = 'none';
-        $('#attachments-list').innerHTML = '';
-        uploadedFileIds = [];
-        $('#profile-session-badge').textContent = '—';
-    } catch(e) {
-        console.error('Reset error:', e);
-    }
-}
-
-function copyProfileJSON() {
-    const display = $('#profile-json-display');
-    if (!display || !display.textContent) return;
-    navigator.clipboard.writeText(display.textContent).then(() => {
-        // brief flash
-        const btn = document.querySelector('#profile-preview-area .btn-outline');
-        if (btn) {
-            const orig = btn.innerHTML;
-            btn.innerHTML = '<i class="fa-solid fa-check"></i> Copié !';
-            setTimeout(() => { btn.innerHTML = orig; }, 1500);
-        }
-    });
-}
-
-function formatBytes(bytes) {
-    if (bytes < 1024) return bytes + ' o';
-    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' Ko';
-    return (bytes / 1048576).toFixed(1) + ' Mo';
-}
-
-// ── Drop zone collapse (animated) ─────────────────────────────────
-function collapseDropZone() {
-    const dropzone = $('#profile-dropzone');
-    if (!dropzone || dropzone.classList.contains('collapsed')) return;
-    dropzone.classList.add('collapsed');
-    // After transition ends, hide it so messages are fully clickable
-    setTimeout(() => {
-        if (dropzone.classList.contains('collapsed')) {
-            dropzone.style.display = 'none';
-        }
-    }, 400);
 }
 
 // ── Polling ────────────────────────────────────────────────────────
@@ -1024,6 +1025,178 @@ function showLLMStatus(type, message) {
     el.style.display = 'block';
     el.textContent = message;
     el.className = 'llm-status-bar llm-status-' + type;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Semantic Criteria — pré-filtrage hybride
+// ═══════════════════════════════════════════════════════════════════
+
+let _boostKeywords = [];
+
+// ── Init ──────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    loadSemanticCriteria();
+
+    // Bind controls
+    const btnSaveSemantic = $('#btn-save-semantic');
+    if (btnSaveSemantic) btnSaveSemantic.addEventListener('click', saveSemanticCriteria);
+    const btnResetSemantic = $('#btn-reset-semantic');
+    if (btnResetSemantic) btnResetSemantic.addEventListener('click', resetSemanticCriteria);
+    const btnAddBoostKw = $('#btn-add-boost-kw');
+    if (btnAddBoostKw) btnAddBoostKw.addEventListener('click', addBoostKeyword);
+
+    const boostInput = $('#boost-kw-input');
+    if (boostInput) {
+        boostInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); addBoostKeyword(); }
+        });
+    }
+});
+
+// ── Load ──────────────────────────────────────────────────────────
+async function loadSemanticCriteria() {
+    try {
+        const data = await apiGet('/semantic-criteria');
+        if (data.desired_role) $('#sc-desired-role').value = data.desired_role;
+        if (data.skills) $('#sc-skills').value = data.skills;
+        _boostKeywords = data.boost_keywords || [];
+
+        // Boost weight radio
+        const weight = data.boost_weight || 'modéré';
+        const radios = document.querySelectorAll('input[name="boost-weight"]');
+        radios.forEach(r => { r.checked = r.value === weight; });
+        updateBoostWeightUI(weight);
+
+        renderBoostKeywords();
+        updateSemanticBadge(data);
+    } catch(e) {
+        console.error('Semantic criteria load:', e);
+    }
+}
+
+// ── Save ──────────────────────────────────────────────────────────
+async function saveSemanticCriteria() {
+    const btn = $('#btn-save-semantic');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+    try {
+        const weightRadio = document.querySelector('input[name="boost-weight"]:checked');
+        const payload = {
+            desired_role: $('#sc-desired-role').value.trim(),
+            skills: $('#sc-skills').value.trim(),
+            boost_keywords: _boostKeywords,
+            boost_weight: weightRadio ? weightRadio.value : 'modéré',
+        };
+        const data = await apiPost('/semantic-criteria/save', payload);
+        updateSemanticBadge(data);
+    } catch(e) {
+        console.error('Save semantic criteria:', e);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Appliquer';
+    }
+}
+
+// ── Reset ─────────────────────────────────────────────────────────
+async function resetSemanticCriteria() {
+    try {
+        await fetch(API + '/semantic-criteria/reset', { method: 'DELETE' });
+        $('#sc-desired-role').value = '';
+        $('#sc-skills').value = '';
+        _boostKeywords = [];
+        renderBoostKeywords();
+        document.querySelector('input[name="boost-weight"][value="modéré"]').checked = true;
+        updateBoostWeightUI('modéré');
+        $('#semantic-criteria-badge').textContent = 'optionnel';
+        $('#semantic-criteria-badge').style.color = 'var(--color-text-muted)';
+    } catch(e) {
+        console.error('Reset semantic:', e);
+    }
+}
+
+// ── Boost Keywords ────────────────────────────────────────────────
+function addBoostKeyword(val) {
+    const term = (val || $('#boost-kw-input').value).trim();
+    if (!term) return;
+    if (_boostKeywords.includes(term)) return;
+    _boostKeywords.push(term);
+    $('#boost-kw-input').value = '';
+    renderBoostKeywords();
+}
+
+function removeBoostKeyword(idx) {
+    _boostKeywords.splice(idx, 1);
+    renderBoostKeywords();
+}
+
+function renderBoostKeywords() {
+    const container = $('#boost-keywords-tags');
+    if (_boostKeywords.length === 0) {
+        container.innerHTML = '<span class="boost-empty">Aucun mot-clé. Ajoutez-en pour booster les offres pertinentes.</span>';
+    } else {
+        container.innerHTML = _boostKeywords.map((kw, i) => `
+            <span class="boost-tag">
+                ${escapeHtml(kw)}
+                <button class="boost-tag-remove" onclick="removeBoostKeyword(${i})" title="Supprimer">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </span>
+        `).join('');
+    }
+}
+
+// ── Boost Weight ──────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    // Delegated click for boost weight selector (since it may not exist on first DOMContentLoaded)
+    document.addEventListener('click', (e) => {
+        const opt = e.target.closest('.boost-weight-opt');
+        if (!opt) return;
+        const group = opt.closest('#boost-weight-group');
+        if (!group) return;
+        group.querySelectorAll('.boost-weight-opt').forEach(el => el.classList.remove('active'));
+        opt.classList.add('active');
+        opt.querySelector('input').checked = true;
+    });
+});
+
+function updateBoostWeightUI(weight) {
+    document.querySelectorAll('.boost-weight-opt').forEach(opt => {
+        opt.classList.toggle('active', opt.dataset.weight === weight);
+    });
+}
+
+// ── Badge ─────────────────────────────────────────────────────────
+function updateSemanticBadge(data) {
+    const badge = $('#semantic-criteria-badge');
+    const parts = [];
+    if (data.desired_role) parts.push(data.desired_role);
+    if (data.boost_keywords && data.boost_keywords.length > 0) parts.push(data.boost_keywords.length + ' mot(s)-clé(s)');
+    if (data.skills) parts.push('compétences');
+    if (parts.length > 0) {
+        badge.textContent = parts.slice(0, 2).join(' · ') + (parts.length > 2 ? ' ...' : '');
+        badge.style.color = 'var(--color-accent)';
+    } else {
+        badge.textContent = 'optionnel';
+        badge.style.color = 'var(--color-text-muted)';
+    }
+}
+
+async function saveSemanticCriteriaSilent() {
+    try {
+        const weightRadio = document.querySelector('input[name="boost-weight"]:checked');
+        await fetch(API + '/semantic-criteria/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                desired_role: $('#sc-desired-role').value.trim(),
+                skills: $('#sc-skills').value.trim(),
+                boost_keywords: _boostKeywords,
+                boost_weight: weightRadio ? weightRadio.value : 'modéré',
+            }),
+        });
+    } catch(e) {
+        console.error('Silent save semantic:', e);
+    }
 }
 </script>
 {% endblock %}

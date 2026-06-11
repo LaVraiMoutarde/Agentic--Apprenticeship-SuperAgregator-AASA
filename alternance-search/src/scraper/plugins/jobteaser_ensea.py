@@ -3,22 +3,23 @@ Scraper JobTeaser ENSEA — offres d'alternance de l'ecole ENSEA.
 
 URL seed : https://ensea.jobteaser.com/fr/job-offers?contract=alternating
 
-Authentification:
-  - OpenID Connect via jobteaser.com (OAuth)
-  - Necessite une session prealable
-  - Utilise storage_state Playwright (comme Moodle)
+Authentification : OpenID Connect via storage_state Playwright.
 
-Structure:
-  - Liste d'offres (grille de cartes)
-  - Filtres via URL (contract=alternating deja present)
-  - Pagination : scroll infini ou bouton "Voir plus"
+Structure (découverte via debug) :
+    - Les offres sont listées en grille (pas de classes CSS exploitables)
+    - Chaque offre est un lien <a href="/fr/job-offers/{uuid}-...">
+    - Le texte visible suit le pattern :
+        [Entreprise]
+        [Titre du poste]
+        Alternance X à Y mois
+        [Ville, France]
+    - Pagination : ?contract=alternating&page=N
+    - ~8 466 offres au total
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import random
 import re
 from pathlib import Path
 from typing import Any
@@ -27,16 +28,16 @@ from ..base import BaseScraper, ScrapedOffer, ScraperResult
 from ..exceptions import ScraperNetworkError
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Configuration
-# ═══════════════════════════════════════════════════════════════════
-
 BASE_URL = "https://ensea.jobteaser.com"
 SEARCH_URL = f"{BASE_URL}/fr/job-offers"
 
 
 class JobTeaserEnseaScraper(BaseScraper):
-    """Scraper pour JobTeaser ENSEA (offres d'alternance)."""
+    """Scraper pour JobTeaser ENSEA (offres d'alternance).
+
+    Authentification OpenID Connect requise : lancer 'python -m scripts.save_auth'
+    avant le premier scraping pour sauvegarder le storage_state.
+    """
 
     def __init__(
         self,
@@ -68,10 +69,12 @@ class JobTeaserEnseaScraper(BaseScraper):
         max_pages: int = 5,
         criteria=None,
     ) -> ScraperResult:
+        _ = location
         errors: list[Exception] = []
         all_offers: list[ScrapedOffer] = []
 
-        self.logger.info("Debut JobTeaser ENSEA — query='%s', storage=%s", query, self.storage_state_path)
+        self.logger.info("Debut JobTeaser ENSEA — query='%s', storage=%s",
+                         query, self.storage_state_path)
 
         try:
             offers = asyncio.run(self._scrape_async(query, max_pages))
@@ -81,9 +84,14 @@ class JobTeaserEnseaScraper(BaseScraper):
             self.logger.error("Erreur fatale: %s: %s", type(exc).__name__, exc)
             errors.append(exc)
 
-        result = self._build_result(all_offers, pages=max_pages, total_found=len(all_offers), errors=errors)
+        result = self._build_result(all_offers, pages=max_pages,
+                                     total_found=len(all_offers), errors=errors)
         self._log_examples(all_offers)
         return result
+
+    # ═══════════════════════════════════════════════════════════════
+    # Scraping asynchrone
+    # ═══════════════════════════════════════════════════════════════
 
     async def _scrape_async(self, query: str, max_pages: int) -> list[ScrapedOffer]:
         from playwright.async_api import async_playwright
@@ -91,13 +99,20 @@ class JobTeaserEnseaScraper(BaseScraper):
         all_offers: list[ScrapedOffer] = []
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=self.headless)
+            from ..browser import get_browser_kwargs
+            browser_kwargs = get_browser_kwargs(headless=self.headless)
+            browser = await p.chromium.launch(**browser_kwargs)
             ctx_kwargs: dict = {}
             if self.storage_state_path.exists():
                 ctx_kwargs["storage_state"] = str(self.storage_state_path)
                 self.logger.info("Session chargee depuis %s", self.storage_state_path.name)
             else:
-                self.logger.warning("Aucun storage_state — connexion necessaire")
+                self.logger.warning(
+                    "⚠ Fichier storage_state introuvable : %s\n"
+                    "  → Lancez 'python -m scripts.save_auth' pour vous authentifier\n"
+                    "  → ou 'make auth' si vous utilisez le Makefile.",
+                    self.storage_state_path,
+                )
 
             context = await browser.new_context(**ctx_kwargs,
                 viewport={"width": 1920, "height": 1080}, locale="fr-FR")
@@ -106,193 +121,322 @@ class JobTeaserEnseaScraper(BaseScraper):
             try:
                 url = self._build_url(query)
                 self.logger.info("Navigation vers %s", url)
-                await page.goto(url, wait_until="networkidle", timeout=self.timeout * 1000)
-                await page.wait_for_timeout(3000)
+                await page.goto(url, wait_until="domcontentloaded",
+                                timeout=self.timeout * 1000)
+                await page.wait_for_timeout(8000)
 
-                # Detection redirection auth
+                # Détection redirection auth
                 if "connect.jobteaser.com" in page.url or "login" in page.url.lower():
                     self.logger.error("Redirige vers authentification OpenID")
                     raise RuntimeError(
-                        "Authentification requise. Lancez d'abord scripts/save_auth_jobteaser.py"
+                        "Authentification requise. "
+                        "Lancez d'abord scripts/save_auth_jobteaser.py"
                     )
 
-                for pagenum in range(max_pages):
-                    self.logger.info("Page %d/%d", pagenum + 1, max_pages)
+                self.logger.info("Page chargee — URL: %s", page.url[:80])
 
-                    # Attendre le chargement des offres
-                    try:
-                        await page.wait_for_selector(
-                            '[class*="card"], [class*="offer"], [class*="job"], '
-                            '[data-testid*="offer"], [data-testid*="job"], '
-                            'article, a[href*="/fr/job-offers/"]',
-                            timeout=15000,
-                        )
-                        await page.wait_for_timeout(2000)
-                    except Exception:
-                        self.logger.info("Plus d'offres")
-                        break
+                # Détecter le nombre total d'offres sur la page
+                total_offers = await self._detect_total_offers(page)
+                offers_per_page = await self._count_offers_per_page(page) or 22
+                if total_offers and offers_per_page:
+                    total_pages = max(1, (total_offers + offers_per_page - 1) // offers_per_page)
+                    effective_max = min(max_pages, total_pages)
+                    self.logger.info(
+                        "~%d offres, ~%d/p, ~%d pages max (%d demandees)",
+                        total_offers, offers_per_page, total_pages, max_pages,
+                    )
+                else:
+                    effective_max = max_pages
 
+                for pagenum in range(effective_max):
+                    self.logger.info("Page %d/%d", pagenum + 1, effective_max)
+
+                    # Navigation (sauf pour la page 1 déjà chargée)
+                    if pagenum > 0:
+                        next_url = self._build_page_url(query, pagenum + 1)
+                        self.logger.info("Page suivante: %s", next_url)
+                        await page.goto(next_url, wait_until="domcontentloaded",
+                                        timeout=self.timeout * 1000)
+                        await page.wait_for_timeout(5000)
+
+                    # Extraction avec retry si pas d'offres
                     offers = await self._extract_offers(page)
-                    all_offers.extend(offers)
-                    self.logger.info("Page %d: %d offres (total: %d)", pagenum + 1, len(offers), len(all_offers))
+                    if not offers:
+                        self.logger.info("Attente supplementaire...")
+                        await page.wait_for_timeout(5000)
+                        offers = await self._extract_offers(page)
 
                     if not offers:
+                        self.logger.info("Plus d'offres — fin")
                         break
 
-                    # Pagination
-                    has_more = await self._load_more(page)
-                    if not has_more:
-                        self.logger.info("Fin de la pagination")
-                        break
-
-                    await asyncio.sleep(random.uniform(1, 2))
+                    all_offers.extend(offers)
+                    self.logger.info("Page %d: %d offres (total: %d)",
+                                     pagenum + 1, len(offers), len(all_offers))
 
             finally:
                 await browser.close()
 
         return all_offers
 
+    # ═══════════════════════════════════════════════════════════════
+    # Détection du nombre de pages
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _detect_total_offers(self, page) -> int | None:
+        """Détecte le nombre total d'offres depuis le texte de la page.
+
+        Pattern JobTeaser : "8 466 offres" ou "8466 offres"
+        """
+        try:
+            body = await page.inner_text("body")
+            m = re.search(r"([\d\s]+)\s*offres?", body)
+            if m:
+                raw = m.group(1).strip()
+                # Nettoyer les espaces insécables
+                num = int(raw.replace("\u202f", "").replace(" ", ""))
+                if num > 0:
+                    self.logger.debug("Total offres detecte: %d", num)
+                    return num
+            self.logger.debug("Total offres non detecte")
+            return None
+        except Exception as exc:
+            self.logger.debug("Erreur detection total: %s", exc)
+            return None
+
+    async def _count_offers_per_page(self, page) -> int | None:
+        """Compte les offres sur la page courante pour estimer le nombre par page."""
+        try:
+            offers = await self._extract_offers(page)
+            return len(offers) if offers else None
+        except Exception:
+            return None
+
+    # ═══════════════════════════════════════════════════════════════
+    # Extraction
+    # ═══════════════════════════════════════════════════════════════
+
     async def _extract_offers(self, page) -> list[ScrapedOffer]:
-        """Extrait toutes les offres visibles sur la page."""
+        """Extrait les offres de la page via les liens /fr/job-offers/."""
         offers: list[ScrapedOffer] = []
 
-        # Selecteurs JobTeaser
-        card_selectors = [
-            'a[href*="/fr/job-offers/"]',
-            '[class*="card"], article, [class*="offer"]',
-            '[data-testid*="offer"], [data-testid*="job"]',
-        ]
-        cards = page.locator(", ".join(card_selectors))
-        count = await cards.count()
-        self.logger.debug("%s cartes trouvees", count)
+        job_links = page.locator("a[href*='/fr/job-offers/']")
+        count = await job_links.count()
+        self.logger.debug("Liens d'offres trouvés : %d", count)
 
-        seen = set()
+        seen_urls: set[str] = set()
         for i in range(count):
-            card = cards.nth(i)
             try:
-                href = ""
-                if await card.locator("..").count() > 0:
-                    pass
-                tag = await card.evaluate("el => el.tagName.toLowerCase()")
-                link_el = card
-                if tag != "a":
-                    link_el = card.locator("a[href*='/fr/job-offers/']").first()
-                    if await link_el.count() == 0:
-                        continue
-                href = (await link_el.get_attribute("href")) or ""
+                link = job_links.nth(i)
+                href = (await link.get_attribute("href")) or ""
 
-                if not href or href in seen:
+                if not href or "?" in href or "#" in href:
                     continue
-                seen.add(href)
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
 
                 full_url = self._make_abs(href)
-                title = await self._el_text(link_el, "h2, h3, [class*='title'], strong, [class*='name']")
-                if not title:
-                    title = (await link_el.inner_text()).strip()
 
-                if not title:
+                # Récupérer tout le texte du conteneur d'offre
+                block_text = await link.evaluate("""
+                    (el) => {
+                        // Remonter jusqu'au conteneur de l'offre (carte)
+                        let node = el;
+                        let best = el.innerText || '';
+                        for (let d = 0; d < 10; d++) {
+                            if (!node || !node.parentElement) break;
+                            node = node.parentElement;
+                            const t = (node.innerText || '').trim();
+                            // Un conteneur d'offre contient typiquement 80-300 caractères
+                            if (t.length >= 60 && t.length <= 600) { best = t; break; }
+                            if (t.length > best.length && t.length < 2000) best = t;
+                        }
+                        return best;
+                    }
+                """)
+                if not block_text:
+                    block_text = await link.inner_text()
+
+                title = self._extract_title_from_block(block_text)
+                if not title or len(title) < 5:
                     continue
 
-                # Texte complet de la carte
-                card_text = await card.inner_text() if tag == "a" else await link_el.locator("..").inner_text() if await link_el.locator("..").count() > 0 else ""
+                company = self._extract_company_from_block(block_text, title)
+                location = self._extract_location_from_block(block_text)
+                contract_type = self._extract_contract_from_block(block_text)
+                description = block_text[:2000]
 
-                company = await self._extract_company(card, card_text)
-                location = await self._extract_location(card, card_text)
-                description = await self._extract_description(card, card_text) or title
-                contract_type = "Alternance"
+                # Fallback : extraire depuis l'URL JobTeaser
+                # Format: /fr/job-offers/{uuid}-{company}-{title}-{location}
+                slug_parts = href.strip("/").split("/")[-1].split("-")
+                if not company and len(slug_parts) > 3:
+                    company = self._company_from_slug(slug_parts, title)
+                if not location:
+                    location = self._location_from_slug(slug_parts)
 
                 offers.append(ScrapedOffer(
                     title=title[:200],
-                    description=description[:500],
+                    description=description,
                     url=full_url,
                     source=self.name,
-                    company=company,
-                    location=location,
-                    contract_type=contract_type,
+                    company=company[:300] if company else "",
+                    location=location[:300] if location else "",
+                    contract_type=contract_type[:100],
                 ))
 
             except Exception as exc:
-                self.logger.debug("Carte #%d ignoree: %s", i, exc)
+                self.logger.debug("Lien #%d ignoré: %s", i, exc)
 
         return offers
 
-    async def _el_text(self, parent, selector: str) -> str:
-        el = parent.locator(selector).first()
-        return (await el.inner_text()).strip() if await el.count() > 0 else ""
+    # ═══════════════════════════════════════════════════════════════
+    # Parsing du texte
+    # ═══════════════════════════════════════════════════════════════
 
-    async def _extract_company(self, card, text: str) -> str:
-        """Extrait le nom de l'entreprise de la carte."""
-        # Selecteurs specifiques
-        for sel in ['[class*="company"], [class*="enterprise"], [itemprop="name"]']:
-            v = await self._el_text(card, sel)
-            if v:
-                return v
+    @staticmethod
+    def _extract_title_from_block(text: str) -> str:
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        for i, line in enumerate(lines[:5]):
+            if re.search(
+                r"(Alternance|Apprenti|Stage|CDD|CDI|Ingénieur|Chargé|Développeur|"
+                r"Data|Analyst|Consultant|Responsable|Chef|Technicien)",
+                line, re.IGNORECASE,
+            ):
+                return line[:200]
+        return lines[1][:200] if len(lines) >= 2 else lines[0][:200] if lines else ""
 
-        # Regex dans tout le texte de la carte
-        if text:
-            m = re.search(r'(?:chez|@|entreprise\s*:)\s*([A-Z][A-Za-z0-9éèêëàâîïôùûç\s&\-]{2,50})', text)
-            if m:
-                return m.group(1).strip()
-
+    @staticmethod
+    def _extract_company_from_block(text: str, title: str) -> str:
+        """Extrait le nom de l'entreprise. C'est la 1re ligne du bloc."""
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        for line in lines[:6]:
+            if line == title:
+                continue
+            if len(line) < 2 or len(line) > 80:
+                continue
+            # Ignorer les métadonnées, dates, URLs, etc.
+            if re.search(
+                r"^(Alternance|Apprenti|Stage|CDD|CDI|\d+\s*(mois|an|h)|"
+                r"semaine|candidatur|ghost|recruteur|newsfeed|Campagne|"
+                r"il y a|Offre de|Candidature|Sauvegarder|Parcourez)",
+                line, re.IGNORECASE,
+            ):
+                continue
+            if re.search(r"^(https?://|/[a-z])", line):
+                continue
+            return line[:100]
         return ""
 
-    async def _extract_location(self, card, text: str) -> str:
-        for sel in ['[class*="location"], [class*="lieu"], [class*="city"], [itemprop*="locality"]']:
-            v = await self._el_text(card, sel)
-            if v:
-                return v
-        if text:
-            m = re.search(r'(?:a|localisation\s*:)\s*([A-Z][a-zéèêëàâîïôùûç]+(?:\s?\(?\d{5}\)?)?)', text)
-            if m:
-                return m.group(1).strip()
+    @staticmethod
+    def _extract_location_from_block(text: str) -> str:
+        """Extrait la localisation (Ville, France)."""
+        if not text:
+            return ""
+        # Pattern: "Ville, France" ou "Ville (CP), France"
+        m = re.search(
+            r"([A-Z][a-zéèêëàâîïôùûç\-]+(?:[-\s][A-Z][a-zéèêëàâîïôùûç\-]+)*)"
+            r"\s*(?:\(\d{4,5}\))?\s*,\s*"
+            r"(?:France|Ile[-\s]de[-\s]France|Île[-\s]de[-\s]France|Paris)",
+            text,
+        )
+        if m:
+            return m.group(0).strip()
         return ""
 
-    async def _extract_description(self, card, text: str) -> str:
-        for sel in ['[class*="desc"], [class*="content"], p, [class*="snippet"]']:
-            v = await self._el_text(card, sel)
-            if v:
-                return v
-        return text[:500] if text else ""
+    @staticmethod
+    def _extract_contract_from_block(text: str) -> str:
+        m = re.search(
+            r"(Alternance|Stage|Apprentissage|Contrat\s*(pro|d'apprentissage|CDD|CDI))"
+            r"(\s*\d+\s*(à|a|to)\s*\d+\s*(mois|ans|month|year))?",
+            text, re.IGNORECASE,
+        )
+        return m.group(0).strip()[:100] if m else "Alternance"
 
-    async def _load_more(self, page) -> bool:
-        """Tente de charger plus d'offres (pagination infinie ou bouton)."""
-        selectors = [
-            'button:has-text("Voir plus"), button:has-text("Afficher plus")',
-            'button:has-text("Load more"), button:has-text("Show more")',
-            '[class*="load-more"], [class*="pagination"] button',
+    @staticmethod
+    def _company_from_slug(slug_parts: list[str], title: str) -> str:
+        """Extrait le nom de l'entreprise depuis le slug de l'URL.
+
+        Le slug JobTeaser: {uuid}-{company-slug}-{title-slug}
+        On saute l'UUID (partie avec des chiffres) et on prend jusqu'au premier mot du titre.
+        """
+        # Sauter les parties UUID (hexa, courtes) et les parties trop courtes
+        clean_parts = [
+            p for p in slug_parts
+            if not re.match(r"^[0-9a-f]{4,}$", p) and len(p) > 1
         ]
+        title_first = title.split()[0].lower() if title else ""
+        company_words = []
+        for part in clean_parts:
+            if part.lower() == title_first or part.lower() in ("alternance", "apprenti", "stage"):
+                break
+            company_words.append(part.capitalize())
+        result = " ".join(company_words).strip()
+        return result[:100] if result else ""
 
-        for sel in selectors:
-            btn = page.locator(sel).first()
-            if await btn.count() > 0:
-                try:
-                    await btn.click()
-                    await page.wait_for_timeout(3000)
-                    return True
-                except Exception:
-                    continue
+    @staticmethod
+    def _location_from_slug(slug_parts: list[str]) -> str:
+        """Tente d'extraire la localisation depuis la fin du slug."""
+        KNOWN_CITIES = {
+            "paris", "lyon", "marseille", "lille", "toulouse", "bordeaux",
+            "nantes", "strasbourg", "montpellier", "rennes", "nice", "toulon",
+            "saint-cloud", "boulogne", "charenton", "versailles", "orleans",
+            "saint-denis", "cergy", "pontoise", "la-hague", "la-defense",
+            "neuilly", "issy", "ivry", "courbevoie", "nanterre", "vitry",
+            "creteil", "noisy", "montreuil", "aubervilliers", "clichy",
+            "pantin", "bagnolet", "fontenay", "guyancourt", "velizy",
+            "clamart", "meudon", "suresnes", "puteaux", "levallois",
+            "longueil", "saint-quentin", "evry",
+            "argenteuil", "colombes", "rueil", "asnieres", "gennevilliers",
+            "sartrouville", "massy", "antony",
+            "saint-ouen", "bezons", "saint-germain", "poissy",
+            "gentilly", "villejuif", "montrouge", "malakoff",
+        }
+        # Chercher de droite à gauche les mots de ville
+        result_parts = []
+        i = len(slug_parts) - 1
+        while i >= 0:
+            part = slug_parts[i]
+            if part.lower() in KNOWN_CITIES:
+                result_parts.insert(0, part.capitalize())
+                i -= 1
+                # Vérifier si le mot précédent fait partie du nom de la ville
+                # (ex: "charenton-le-pont" → parts: ["charenton", "le", "pont"])
+                if i >= 0 and slug_parts[i].lower() in ("le", "la", "les", "sur", "sous", "en"):
+                    result_parts.insert(0, slug_parts[i].capitalize())
+                    i -= 1
+            elif result_parts:
+                break
+            i -= 1
+        if result_parts:
+            location = " ".join(result_parts).replace("-", "-")
+            if not any(c in location.lower() for c in ("france", "belgique", "suisse")):
+                location += ", France"
+            return location
+        return ""
 
-        # Scroll infini
-        try:
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(2000)
-            new_height = await page.evaluate("document.body.scrollHeight")
-            # Verifier si le contenu a change
-            return True
-        except Exception:
-            return False
+    # ═══════════════════════════════════════════════════════════════
+    # URL
+    # ═══════════════════════════════════════════════════════════════
 
     def _build_url(self, query: str) -> str:
         params = ["contract=alternating"]
         if query:
-            params.append(f"keyword={self._url_encode(query)}")
+            params.append(f"keyword={query.replace(' ', '+')}")
+        return f"{SEARCH_URL}?{'&'.join(params)}"
+
+    def _build_page_url(self, query: str, page_num: int) -> str:
+        params = ["contract=alternating", f"page={page_num}"]
+        if query:
+            params.append(f"keyword={query.replace(' ', '+')}")
         return f"{SEARCH_URL}?{'&'.join(params)}"
 
     def _make_abs(self, href: str) -> str:
         return href if href.startswith("http") else f"{BASE_URL}{href}"
 
-    def _url_encode(self, text: str) -> str:
-        return text.replace(" ", "+")
+    # ═══════════════════════════════════════════════════════════════
+    # Logging
+    # ═══════════════════════════════════════════════════════════════
 
     def _log_examples(self, offers: list[ScrapedOffer]) -> None:
         if not offers:

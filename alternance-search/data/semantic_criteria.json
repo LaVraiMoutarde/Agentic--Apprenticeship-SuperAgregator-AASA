@@ -1,0 +1,20 @@
+{
+  "desired_role": "",
+  "skills": "python,C#",
+  "boost_keywords": [
+    "n8n",
+    "claude code",
+    "agent ia",
+    "llm",
+    "local llm",
+    "ux",
+    "mcp",
+    "ui",
+    "dotnet",
+    "web",
+    "data",
+    "developpement logiciel",
+    "api"
+  ],
+  "boost_weight": "fort"
+}

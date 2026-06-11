@@ -54,6 +54,8 @@ class IQuestaScraper(BaseScraper):
         errors: list[Exception] = []
         all_offers: list[ScrapedOffer] = []
 
+        self._criteria = criteria
+
         self.logger.info("Debut iQuesta — query='%s', location='%s', max_pages=%d", query, location, max_pages)
 
         try:
@@ -209,11 +211,15 @@ class IQuestaScraper(BaseScraper):
                 if not description:
                     description = title
 
+                # Extraire source_id depuis l'URL (ex: "...-345306.html" → "345306")
+                source_id = self._extract_id_from_url(full_url)
+
                 offer = ScrapedOffer(
                     title=title[:200],
                     description=description[:500],
                     url=full_url,
                     source=self.name,
+                    source_id=source_id,
                     company=company[:200] if company else "",
                     location=location[:200] if location else "",
                     contract_type=contract_type or "",
@@ -340,9 +346,12 @@ class IQuestaScraper(BaseScraper):
                     if m:
                         location = m.group(1).strip()
 
+                # Extraire source_id depuis l'URL
+                source_id = self._extract_id_from_url(full_url)
+
                 offers.append(ScrapedOffer(
                     title=title[:200], description=title[:500], url=full_url,
-                    source=self.name, company=company, location=location,
+                    source=self.name, source_id=source_id, company=company, location=location,
                     contract_type=contract_type,
                 ))
             except Exception:
@@ -358,6 +367,17 @@ class IQuestaScraper(BaseScraper):
             params.append(f"mots={self._encode(query)}")
         if location:
             params.append(f"localisation={self._encode(location)}")
+
+        # Type de contrat iQuesta
+        if hasattr(self, '_criteria') and self._criteria is not None:
+            contract = self._criteria.contract
+            if contract == "apprentissage":
+                params.append("contrat=alternance")
+            elif contract == "professionnalisation":
+                params.append("contrat=professionnalisation")
+            elif contract:
+                params.append(f"contrat={self._encode(contract)}")
+
         if page > 1:
             params.append(f"page={page}")
         return f"{SEARCH_URL}?{'&'.join(params)}" if params else SEARCH_URL
@@ -371,6 +391,15 @@ class IQuestaScraper(BaseScraper):
 
     def _encode(self, text: str) -> str:
         return text.replace(" ", "+")
+
+    def _extract_id_from_url(self, url: str) -> str:
+        """Extrait l'ID numerique depuis une URL iQuesta.
+
+        Ex: '...Offre-Alternance-...-345306.html' → '345306'
+        """
+        import re
+        m = re.search(r'-(\d+)\.html', url)
+        return m.group(1) if m else ""
 
     def _log_examples(self, offers: list[ScrapedOffer]) -> None:
         if not offers:

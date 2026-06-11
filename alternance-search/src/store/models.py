@@ -97,6 +97,8 @@ class Offer(Base):
     is_alternance: Mapped[Optional[float]] = mapped_column(Float, default=None)
     data_quality_score: Mapped[Optional[float]] = mapped_column(Float, default=None)
     llm_score: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    llm_details: Mapped[Optional[str]] = mapped_column(Text, default=None)  # JSON {explanation, strengths, ...}
+    embedding_score: Mapped[Optional[float]] = mapped_column(Float, default=None)
     cleaned_at: Mapped[Optional[str]] = mapped_column(String(30), default=None)
 
     raw_json: Mapped[Optional[str]] = mapped_column(Text)

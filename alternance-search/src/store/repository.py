@@ -10,6 +10,7 @@ Opérations CRUD complètes sur la table `offers` :
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 
 from .database import get_session
@@ -22,8 +23,17 @@ class OfferRepository:
     # ── CRUD ──
 
     def upsert(self, offer: Offer) -> tuple[Offer, bool]:
-        """Insère ou met à jour. Retourne (offer, is_new). Déduplication par (source, source_id)."""
+        """Insère ou met à jour. Retourne (offer, is_new). Déduplication par (source, source_id).
+
+        Si source_id est vide, génère un identifiant à partir du hash de l'URL
+        pour éviter l'écrasement accidentel entre offres distinctes.
+        """
         now = datetime.now(timezone.utc).isoformat()
+
+        # Fallback: si source_id est vide, le générer depuis l'URL
+        if not offer.source_id and offer.url:
+            offer.source_id = hashlib.sha256(offer.url.encode()).hexdigest()[:16]
+
         with get_session() as s:
             existing = (
                 s.query(Offer)
@@ -90,13 +100,23 @@ class OfferRepository:
         source: str | None = None,
         order_by_score: bool = False,
     ) -> list[Offer]:
-        """Récupère les offres actives, triées par score LLM ou date de scrape."""
+        """Récupère les offres actives, triées par score effectif ou date."""
         with get_session() as s:
             q = s.query(Offer).filter(Offer.is_active == 1)
             if source:
                 q = q.filter(Offer.source == source)
-            order = Offer.llm_score.desc().nullslast() if order_by_score else Offer.scraped_date.desc()
-            return q.order_by(order).limit(limit).offset(offset).all()
+            if order_by_score:
+                # Score effectif : llm_score prioritaire, sinon embedding_score, sinon -1 (NULL en fin)
+                from sqlalchemy import case, desc
+                effective = case(
+                    (Offer.llm_score.isnot(None), Offer.llm_score),
+                    (Offer.embedding_score.isnot(None), Offer.embedding_score),
+                    else_=-1,
+                )
+                q = q.order_by(desc(effective), Offer.scraped_date.desc())
+            else:
+                q = q.order_by(Offer.scraped_date.desc())
+            return q.limit(limit).offset(offset).all()
 
     def find_active(
         self,
@@ -198,6 +218,26 @@ class OfferRepository:
                 offer.search_text = search_text
                 offer.updated_at = datetime.now(timezone.utc).isoformat()
                 s.commit()
+
+    def update_llm_details(self, offer_id: int, llm_score: float, llm_details: dict) -> None:
+        """Stocke le score LLM et les détails (explication, forces, etc.) en base."""
+        import json
+        with get_session() as s:
+            s.query(Offer).filter(Offer.id == offer_id).update({
+                "llm_score": round(float(llm_score), 4),
+                "llm_details": json.dumps(llm_details, ensure_ascii=False),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            s.commit()
+
+    def get_llm_details(self, offer_id: int) -> dict | None:
+        """Récupère les détails LLM d'une offre (depuis la base)."""
+        import json
+        with get_session() as s:
+            offer = s.get(Offer, offer_id)
+            if offer and offer.llm_details:
+                return json.loads(offer.llm_details)
+            return None
 
     def get_all_active_ids(self) -> set[int]:
         """Ensemble des IDs actifs (pour sync index)."""

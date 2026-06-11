@@ -109,11 +109,19 @@ class Retriever:
         resp.query = query
         return resp
 
-    def _to_similarity(self, distances: np.ndarray) -> np.ndarray:
-        """Convertit distances turbovec → similarites 0..1."""
-        d = np.asarray(distances, dtype=np.float32)
-        d_max = d.max()
-        if d_max <= 2.0:
-            return 1.0 - d
+    def _to_similarity(self, scores: np.ndarray) -> np.ndarray:
+        """Normalise les scores turbovec (dot-products) en similarités 0..1.
+
+        turbovec retourne des estimateurs de <v, q> (dot-products).
+        Des valeurs plus élevées indiquent une plus grande similarité.
+        On applique une sigmoïde centrée pour normaliser en [0, 1].
+        """
+        d = np.asarray(scores, dtype=np.float32)
+        # Sigmoid centrée : 1 / (1 + exp(-x)) mais avec un scaling raisonnable
+        # Pour des dot-products entre vecteurs normalisés, les valeurs sont dans [-1, 1].
+        # On utilise une simple normalisation min-max sans inversion.
         d_min = d.min()
-        return 1.0 - (d - d_min) / (d_max - d_min + 1e-8)
+        d_max = d.max()
+        if d_max - d_min < 1e-8:
+            return np.ones_like(d) * 0.5  # Tous identiques → score neutre
+        return (d - d_min) / (d_max - d_min)

@@ -1,0 +1,82 @@
+<!-- partials/_semantic_criteria.html — Critères sémantiques (embedding + boost mots-clés) -->
+
+<section class="card card-criteria card-semantic-criteria">
+    <h2 class="card-title">
+        <i class="fa-solid fa-brain"></i> Filtrage sémantique
+        <span class="card-badge" id="semantic-criteria-badge">optionnel</span>
+    </h2>
+
+    <p class="card-desc">Pré-filtrage par embedding avant scoring LLM. Complémentaire aux critères de scraping.</p>
+
+    <div class="criteria-form">
+        <!-- Poste recherché -->
+        <div class="criteria-row">
+            <label class="criteria-label">
+                <i class="fa-solid fa-bullseye"></i> Poste recherché
+            </label>
+            <input id="sc-desired-role" type="text" class="input input-sm"
+                   placeholder="Ex: Data Scientist, Développeur Full Stack...">
+        </div>
+
+        <!-- Compétences -->
+        <div class="criteria-row">
+            <label class="criteria-label">
+                <i class="fa-solid fa-code"></i> Compétences
+            </label>
+            <input id="sc-skills" type="text" class="input input-sm"
+                   placeholder="Ex: Python, SQL, Machine Learning, Docker...">
+        </div>
+
+        <!-- ── Mots-clés techniques (boost) ── -->
+        <div class="criteria-row criteria-row-multiline">
+            <label class="criteria-label">
+                <i class="fa-solid fa-magnifying-glass-plus"></i> Mots-clés boost
+            </label>
+            <div class="boost-keywords-section">
+                <p class="criteria-hint">Termes à valoriser s'ils apparaissent dans les annonces.</p>
+                <div class="boost-keywords-tags" id="boost-keywords-tags"></div>
+                <div class="boost-keywords-add">
+                    <input id="boost-kw-input" type="text" class="input input-sm"
+                           placeholder="Ex: Claude Code, N8N, Three.js..."
+                           autocomplete="off">
+                    <button id="btn-add-boost-kw" class="btn btn-primary btn-sm">
+                        <i class="fa-solid fa-plus"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Poids du boost -->
+        <div class="criteria-row">
+            <label class="criteria-label">
+                <i class="fa-solid fa-weight-scale"></i> Poids boost
+            </label>
+            <div class="boost-weight-selector" id="boost-weight-group">
+                <label class="boost-weight-opt" data-weight="léger">
+                    <input type="radio" name="boost-weight" value="léger">
+                    <span class="boost-weight-label">Léger</span>
+                    <span class="boost-weight-val">+0.05</span>
+                </label>
+                <label class="boost-weight-opt active" data-weight="modéré">
+                    <input type="radio" name="boost-weight" value="modéré" checked>
+                    <span class="boost-weight-label">Modéré</span>
+                    <span class="boost-weight-val">+0.10</span>
+                </label>
+                <label class="boost-weight-opt" data-weight="fort">
+                    <input type="radio" name="boost-weight" value="fort">
+                    <span class="boost-weight-label">Fort</span>
+                    <span class="boost-weight-val">+0.20</span>
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <div class="criteria-actions">
+        <button id="btn-save-semantic" class="btn btn-outline btn-sm">
+            <i class="fa-solid fa-floppy-disk"></i> Appliquer
+        </button>
+        <button id="btn-reset-semantic" class="btn btn-outline btn-sm">
+            <i class="fa-solid fa-rotate-left"></i> Réinitialiser
+        </button>
+    </div>
+</section>

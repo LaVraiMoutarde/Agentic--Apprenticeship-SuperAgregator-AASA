@@ -62,7 +62,7 @@ class SearchCriteria:
         kw = self.keywords_str
         if kw:
             return [kw]
-        return ["alternance"]
+        return []
 
     @property
     def has_filters(self) -> bool:

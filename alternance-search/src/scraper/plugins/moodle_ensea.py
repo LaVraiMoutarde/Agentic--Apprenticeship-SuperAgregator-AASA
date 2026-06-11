@@ -3,15 +3,15 @@ Scraper Moodle ENSEA — extrait les offres de la Database Activity Moodle.
 
 URL cible : https://moodle.ensea.fr/mod/data/view.php?id=14716
 
-Structure Moodle Database Activity :
-    - Mode liste par défaut (table.generaltable)
-    - Chaque ligne = une entrée, colonnes = champs configurés
-    - Mode vue (view.php?rid=XXX) pour les détails
-    - Pagination en bas de page
+Structure réelle (découverte via debug) :
+    - La page contient un unique div.box.py-3
+    - Tous les champs de toutes les offres sont des enfants séquentiels de ce div
+    - Chaque champ a class="data-field-link" (lien fichier/URL) ou class="data-field-html" (description)
+    - La plupart des offres = 1 lien + 1 html ; certaines offres = juste html (lien externe dans le html)
+    - Pagination : a[href*='&page=']
 
 Authentification :
-    - CAS ENSEA via Playwright (pas de cookies hardcodés)
-    - Utilise `storage_state` sauvegardé après connexion manuelle
+    - CAS ENSEA via Playwright (storage_state sauvegardé après connexion manuelle)
 
 Usage :
     from src.scraper.plugins.moodle_ensea import MoodleEnseaScraper
@@ -27,9 +27,7 @@ Usage :
 from __future__ import annotations
 
 import asyncio
-import json
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,75 +36,37 @@ from ..exceptions import ScraperParseError
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Configuration du scraper
+# Configuration
 # ═══════════════════════════════════════════════════════════════════
 
-# URL de l'activité Database Moodle
 SEED_URL = "https://moodle.ensea.fr/mod/data/view.php?id=14716"
 BASE_URL = "https://moodle.ensea.fr"
 
-# Mapping des colonnes du tableau Moodle → champs ScrapedOffer.
-# Adaptez ces valeurs selon la configuration réelle de la Database Moodle.
-# Les clés sont les noms de colonnes affichés dans le tableau Moodle.
-COLUMN_MAPPING: dict[str, str] = {
-    "Titre": "title",
-    "Entreprise": "company",
-    "Lieu": "location",
-    "Description": "description",
-    "Contact": "contact_name",
-    "Email": "contact_email",
-    "Niveau": "required_level",
-    "Domaine": "domain",
-    "Type de contrat": "contract_type",
-    "Salaire": "salary_raw",
-    "URL": "url",
-    "Date de publication": "published_date",
-}
-
-# Sélecteurs CSS pour la Database Activity Moodle
-SELECTORS = {
-    "table": "table.generaltable, table.flexible, table.dataview",
-    "rows": "tbody tr, tr.r0, tr.r1",
-    "pagination": "nav.pagination ul.pagination li.page-item a.page-link, div.paging a",
-    "view_link": "a[href*='view.php?rid=']",
-    "single_entry": "div.entry, div.entrybox",
-    "fields_container": "div.field, div.fields, table.dataview",
-    "field_name": ".field-name, th.c0, .field-label",
-    "field_value": ".field-value, td.c1, .field-content",
-}
-
 
 class MoodleEnseaScraper(BaseScraper):
-    """Scraper pour l'activité Database Moodle de l'ENSEA.
+    """Scraper pour l'activite Database Moodle de l'ENSEA.
 
-    Extrait les offres d'alternance depuis la base de données Moodle
+    Extrait les offres d'alternance depuis la base de donnees Moodle
     en utilisant Playwright pour le rendu dynamique et l'authentification CAS.
 
-    Args:
-        storage_state_path: Chemin vers le fichier JSON de session Playwright
-                            (obtenu après une connexion manuelle au CAS ENSEA).
-        headless: Exécute le navigateur en mode headless.
-        column_mapping: Mapping personnalisé (nom colonne Moodle → champ ScrapedOffer).
-        base_url: URL de base du Moodle ENSEA.
-        seed_url: URL de l'activité Database à scraper.
+    Authentification requise : lancer 'python -m scripts.save_auth' avant
+    le premier scraping pour sauvegarder le storage_state.
     """
 
     def __init__(
         self,
         storage_state_path: str | Path = "auth/moodle_ensea_state.json",
         headless: bool = True,
-        column_mapping: dict[str, str] | None = None,
         base_url: str = BASE_URL,
         seed_url: str = SEED_URL,
     ) -> None:
         super().__init__()
         self.storage_state_path = Path(storage_state_path)
         self.headless = headless
-        self.column_mapping = column_mapping or COLUMN_MAPPING
         self.base_url = base_url.rstrip("/")
         self.seed_url = seed_url
 
-        # Résoudre le chemin absolu du storage_state
+        # Resoudre le chemin absolu du storage_state
         if not self.storage_state_path.is_absolute():
             project_root = Path(__file__).resolve().parent.parent.parent.parent
             self.storage_state_path = (project_root / storage_state_path).resolve()
@@ -123,16 +83,7 @@ class MoodleEnseaScraper(BaseScraper):
         max_pages: int = 5,
         criteria=None,
     ) -> ScraperResult:
-        """Exécute le scraping de la base de données Moodle.
-
-        Args:
-            query: Non utilisé (la Database Moodle n'a pas de recherche textuelle).
-            location: Non utilisé.
-            max_pages: Nombre max de pages à parcourir.
-
-        Returns:
-            ScraperResult avec les offres collectées.
-        """
+        """Exécute le scraping de la base de données Moodle."""
         _ = query, location
         errors: list[Exception] = []
         all_offers: list[ScrapedOffer] = []
@@ -142,91 +93,101 @@ class MoodleEnseaScraper(BaseScraper):
                          self.storage_state_path.exists())
 
         try:
-            offers, pages, total = asyncio.run(
-                self._run_scraping_async(max_pages=max_pages)
+            offers = asyncio.run(
+                self._run_scraping_async(max_pages=max_pages or 9999)
             )
             all_offers = self.validate_output(offers)
             self.logger.info(
-                "Scraping terminé — %d offres validées sur %d récupérées, %d pages",
-                len(all_offers), len(offers), pages,
+                "Scraping terminé — %d offres validées sur %d récupérées",
+                len(all_offers), len(offers),
             )
         except Exception as exc:
             self.logger.error("Erreur fatale : %s: %s", type(exc).__name__, exc)
             errors.append(exc)
 
-        result = self._build_result(all_offers, pages=0, errors=errors)
+        result = self._build_result(all_offers, pages=max_pages, errors=errors)
         if all_offers:
-            result.pages_scraped = max_pages
             result.total_found = len(all_offers)
 
-        # ── Log de debug : 3 exemples ──
         self._log_examples(all_offers)
-
         return result
 
-    async def _run_scraping_async(self, max_pages: int) -> tuple[list[ScrapedOffer], int, int]:
-        """Logique de scraping asynchrone avec Playwright.
+    # ────────────────────────────────────────────────────────────────
+    # Scraping asynchrone (Playwright)
+    # ────────────────────────────────────────────────────────────────
 
-        Returns:
-            (offres, pages_scrapées, total_entrées)
+    async def _run_scraping_async(self, max_pages: int) -> list[ScrapedOffer]:
+        """Scrape la base Moodle page par page.
+
+        Structure réelle :
+            - Un seul div.box.py-3 contient tous les champs de toutes les offres
+            - Les champs data-field-link et data-field-html se succèdent
+            - Chaque offre = 1 link + 1 html (ou parfois juste html)
         """
         from playwright.async_api import async_playwright
 
         all_offers: list[ScrapedOffer] = []
-        pages_scraped = 0
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=self.headless)
+            # Utiliser le helper cross-platform pour la detection du navigateur
+            from ..browser import get_browser_kwargs
+            browser_kwargs = get_browser_kwargs(headless=self.headless)
+            browser = await p.chromium.launch(**browser_kwargs)
 
-            # Charger le storage_state si disponible
             context_kwargs: dict[str, Any] = {}
             if self.storage_state_path.exists():
                 context_kwargs["storage_state"] = str(self.storage_state_path)
-                self.logger.info("Session chargée depuis %s", self.storage_state_path.name)
+                self.logger.info("Session chargee depuis %s", self.storage_state_path.name)
             else:
                 self.logger.warning(
-                    "Fichier storage_state introuvable : %s — "
-                    "connectez-vous manuellement et sauvegardez l'état.",
+                    "⚠ Fichier storage_state introuvable : %s\n"
+                    "  → Lancez 'python -m scripts.save_auth' pour vous authentifier\n"
+                    "  → ou 'make auth' si vous utilisez le Makefile.",
                     self.storage_state_path,
                 )
 
-            context = await browser.new_context(**context_kwargs)
+            context = await browser.new_context(**context_kwargs,
+                viewport={"width": 1920, "height": 1080})
             page = await context.new_page()
 
             try:
-                # ── 1. Navigation vers la page cible ──
+                # Navigation vers la page cible
                 self.logger.info("Navigation vers %s", self.seed_url)
                 await page.goto(self.seed_url, wait_until="networkidle", timeout=30000)
-                await page.wait_for_timeout(2000)  # Attendre le rendu JS Moodle
+                await page.wait_for_timeout(2000)
 
-                # Vérifier si on est redirigé vers CAS
+                # Vérifier redirection CAS
                 current_url = page.url
                 if "cas" in current_url.lower() or "login" in current_url.lower():
-                    self.logger.error("Redirigé vers la page de login CAS. URL: %s", current_url)
+                    self.logger.error("Redirige vers la page de login CAS. URL: %s", current_url)
                     raise ScraperParseError(
-                        "Authentification CAS requise. Connectez-vous manuellement, "
-                        "sauvegardez l'état avec page.context.storage_state(path=...), "
-                        "puis relancez le scraper.",
+                        "Authentification CAS ENSEA requise.\n"
+                        "  → Le storage_state est expire ou invalide.\n"
+                        "  → Relancez l'authentification : python -m scripts.save_auth\n"
+                        "  → Puis relancez le scraping.",
                         scraper_name=self.name,
                     )
 
                 self.logger.info("Page chargée — URL: %s", current_url)
 
-                # ── 2. Parsing de la page courante ──
-                for page_num in range(1, max_pages + 1):
+                # Scraper les pages
+                page_num = 0
+                while page_num < max_pages:
+                    page_num += 1
                     self.logger.info("Parsing page %d/%d", page_num, max_pages)
                     await page.wait_for_timeout(1000)
 
-                    page_offers = await self._parse_list_page(page)
+                    page_offers = await self._parse_current_page(page)
                     all_offers.extend(page_offers)
-                    pages_scraped = page_num
-                    self.logger.info("Page %d : %d offres extraites", page_num, len(page_offers))
+                    self.logger.info("Page %d : %d offres extraites (total: %d)",
+                                     page_num, len(page_offers), len(all_offers))
 
-                    # Pagination → page suivante
-                    has_next = await self._go_to_next_page(page)
-                    if not has_next:
-                        self.logger.info("Plus de pages disponibles")
-                        break
+                    # Aller à la page suivante
+                    if page_num < max_pages:
+                        has_next = await self._go_to_next_page(page)
+                        if not has_next:
+                            self.logger.info("Plus de pages disponibles")
+                            break
 
             except ScraperParseError:
                 raise
@@ -240,468 +201,339 @@ class MoodleEnseaScraper(BaseScraper):
             finally:
                 await browser.close()
 
-        return all_offers, pages_scraped, len(all_offers)
+        return all_offers
 
-    async def _parse_list_page(self, page) -> list[ScrapedOffer]:
-        """Parse une page de liste Moodle Database Activity.
+    # ────────────────────────────────────────────────────────────────
+    # Parsing d'une page
+    # ────────────────────────────────────────────────────────────────
 
-        Stratégie :
-        1. Chercher le tableau principal (table.generaltable)
-        2. Extraire les en-têtes pour mapper les colonnes
-        3. Parcourir chaque ligne, mapper les valeurs aux champs ScrapedOffer
-        4. Si pas de tableau, tenter le mode "vue simple" (.entry)
-
-        Args:
-            page: Page Playwright.
+    async def _parse_current_page(self, page) -> list[ScrapedOffer]:
+        """Parse la page courante en extrayant les offres du div.box.py-3.
 
         Returns:
             Liste de ScrapedOffer parsées.
         """
         offers: list[ScrapedOffer] = []
 
-        # ── Détection du mode d'affichage ──
-        table_visible = await page.locator(SELECTORS["table"]).first().count() > 0
-        entries_visible = await page.locator(SELECTORS["single_entry"]).first().count() > 0
+        # Vérifier que le box existe
+        box = page.locator("div.box.py-3")
+        if await box.count() == 0:
+            self.logger.warning("div.box.py-3 introuvable sur la page")
+            return []
 
-        if table_visible:
-            offers = await self._parse_table_mode(page)
-        elif entries_visible:
-            offers = await self._parse_entry_mode(page)
-        else:
-            # Tentative de détection automatique
-            self.logger.warning(
-                "Aucun sélecteur reconnu — tentative de parsing générique"
-            )
-            offers = await self._parse_generic(page)
-
-        # ── Enrichissement : récupérer l'URL de détail ──
-        offers = await self._enrich_with_detail_urls(page, offers)
-
-        return offers
-
-    async def _parse_table_mode(self, page) -> list[ScrapedOffer]:
-        """Parse le mode tableau (le plus courant pour Database Activity).
-
-        Structure Moodle typique :
-            <table class="generaltable">
-                <thead><tr><th>Colonne1</th><th>Colonne2</th>...</tr></thead>
-                <tbody>
-                    <tr>
-                        <td class="c0">valeur</td>
-                        <td class="c1">valeur</td>
-                        ...
-                        <td><a href="view.php?rid=123">Voir</a></td>
-                    </tr>
-                </tbody>
-            </table>
-        """
-        offers: list[ScrapedOffer] = []
-
-        # 1. Extraire les en-têtes
-        headers_raw = await page.locator(
-            f"{SELECTORS['table']} thead th, {SELECTORS['table']} thead td"
-        ).all_inner_texts()
-
-        headers = [h.strip().lower().capitalize() for h in headers_raw if h.strip()]
-        self.logger.debug("Colonnes détectées : %s", json.dumps(headers))
-
-        if not headers:
-            self.logger.warning("Aucune colonne détectée dans le tableau")
-            return offers
-
-        # 2. Construire le mapping d'indices
-        # index → nom_champ_ScrapedOffer
-        mapping: dict[int, str] = {}
-        for idx, header in enumerate(headers):
-            field = self._resolve_field(header)
-            if field:
-                mapping[idx] = field
-
-        self.logger.debug("Mapping colonnes→champs : %s", json.dumps(mapping))
-
-        # 3. Parcourir les lignes du corps du tableau
-        rows = page.locator(SELECTORS["rows"])
-
-        row_count = await rows.count()
-        self.logger.debug("Lignes détectées : %d", row_count)
-
-        for i in range(row_count):
-            row = rows.nth(i)
-            cells = row.locator("td")
-            cell_count = await cells.count()
-
-            if cell_count < 2:
-                continue  # ligne vide ou d'en-tête
-
-            offer_data: dict[str, Any] = {
-                "source": self.name,
-                "source_id": "",
-                "title": "",
-                "description": "",
-                "url": "",
+        # Récupérer tous les data-field elements dans l'ordre du DOM
+        field_elements = await page.evaluate("""
+            () => {
+                const box = document.querySelector('div.box.py-3');
+                if (!box) return [];
+                const all = box.querySelectorAll('[class*="data-field"]');
+                return Array.from(all).map(el => {
+                    const html = el.innerHTML || '';
+                    const text = (el.textContent || '').trim();
+                    const cls = el.className;
+                    const tag = el.tagName;
+                    let href = '';
+                    if (tag === 'A' && el.href) href = el.href;
+                    // Pour les div data-field-html, chercher un lien externe
+                    let externalUrl = '';
+                    if (cls.includes('data-field-html')) {
+                        const links = el.querySelectorAll('a[href]');
+                        for (const lnk of links) {
+                            const h = lnk.href;
+                            if (h && !h.includes('moodle.ensea.fr') && !h.startsWith('mailto:') && !h.startsWith('#')) {
+                                externalUrl = h;
+                                break;
+                            }
+                        }
+                    }
+                    return { cls, tag, text, href, externalUrl, html };
+                });
             }
+        """)
 
-            for j in range(cell_count):
-                cell = cells.nth(j)
-                text = (await cell.inner_text()).strip()
+        if not field_elements:
+            self.logger.warning("Aucun champ data-field trouvé dans le box")
+            return []
 
-                # Détecter le lien de détail (view.php?rid=XXX)
-                detail_link = cell.locator("a[href*='view.php?rid=']").first()
-                if await detail_link.count() > 0:
-                    href = await detail_link.get_attribute("href") or ""
-                    rid = self._extract_rid(href)
-                    if rid:
-                        offer_data["source_id"] = rid
-                        offer_data["url"] = f"{self.base_url}{href}" if href.startswith("/") else href
-                    # Si le lien contient du texte, c'est probablement le titre
-                    if text and not offer_data["title"]:
-                        offer_data["title"] = text
-                    continue
+        self.logger.debug("Champs trouvés : %d", len(field_elements))
 
-                # Détecter un email
-                email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', text)
-                if email_match and not offer_data.get("contact_email"):
-                    offer_data["contact_email"] = email_match.group(0)
-                    # Enlever l'email du texte pour le champ correspondant
-                    text = text.replace(email_match.group(0), "").strip()
-                    if not text:
-                        continue
+        # Grouper les champs en entrées
+        entries = self._group_fields_into_entries(field_elements)
+        self.logger.debug("Entrées groupées : %d", len(entries))
 
-                # Mapper via l'index de colonne
-                if j in mapping:
-                    field_name = mapping[j]
-                    if field_name == "title" and not offer_data.get("title"):
-                        offer_data["title"] = text
-                    elif field_name == "description" and text:
-                        offer_data["description"] = text
-                    elif field_name == "url" and text and not offer_data.get("url"):
-                        if text.startswith("http"):
-                            offer_data["url"] = text
-                    else:
-                        if text and not offer_data.get(field_name):
-                            offer_data[field_name] = text
-
-            # Si pas de source_id trouvé via le lien, chercher dans toute la ligne
-            if not offer_data["source_id"]:
-                # Chercher n'importe quel lien view.php dans la ligne
-                view_link = row.locator("a[href*='rid=']").first()
-                if await view_link.count() > 0:
-                    href = await view_link.get_attribute("href") or ""
-                    rid = self._extract_rid(href)
-                    if rid:
-                        offer_data["source_id"] = rid
-                        if href.startswith("/"):
-                            offer_data["url"] = f"{self.base_url}{href}"
-
-            # Validation minimale
-            if offer_data["title"] or offer_data["description"]:
-                try:
-                    offer = ScrapedOffer(**offer_data)
-                    offers.append(offer)
-                except Exception as exc:
-                    self.logger.warning("Offre invalide ligne %d : %s", i, exc)
-
-        return offers
-
-    async def _parse_entry_mode(self, page) -> list[ScrapedOffer]:
-        """Parse le mode vue individuelle (une entrée par page ou liste verticale).
-
-        Structure Moodle typique :
-            <div class="entry">
-                <div class="field">
-                    <div class="field-name">Titre</div>
-                    <div class="field-value">...</div>
-                </div>
-                ...
-            </div>
-        """
-        offers: list[ScrapedOffer] = []
-        entries = page.locator(SELECTORS["single_entry"])
-        count = await entries.count()
-
-        for i in range(count):
-            entry = entries.nth(i)
-            fields = entry.locator("div.field, div.fields table tr, .dataview tr")
-            field_count = await fields.count()
-
-            offer_data: dict[str, Any] = {
-                "source": self.name,
-                "title": "",
-                "description": "",
-                "url": "",
-            }
-
-            for j in range(field_count):
-                field = fields.nth(j)
-
-                # Extraire nom et valeur du champ
-                name_el = field.locator(SELECTORS["field_name"]).first()
-                value_el = field.locator(SELECTORS["field_value"]).first()
-
-                if await name_el.count() == 0 or await value_el.count() == 0:
-                    # Essayer th/td pour les tables
-                    name_el = field.locator("th, .c0").first()
-                    value_el = field.locator("td, .c1").first()
-
-                if await name_el.count() == 0:
-                    continue
-
-                name = (await name_el.inner_text()).strip()
-                value = (await value_el.inner_text()).strip() if await value_el.count() > 0 else ""
-
-                field_key = self._resolve_field(name)
-                if field_key and value:
-                    if field_key not in offer_data or not offer_data[field_key]:
-                        offer_data[field_key] = value
-
-                # Détecter un email dans la valeur
-                email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', value)
-                if email_match:
-                    offer_data["contact_email"] = email_match.group(0)
-
-                # Détecter un lien
-                link = value_el.locator("a").first() if await value_el.count() > 0 else None
-                if link and await link.count() > 0 if link else False:
-                    href = await link.get_attribute("href")
-                    if href:
-                        rid = self._extract_rid(href)
-                        if rid:
-                            offer_data["source_id"] = rid
-                        if href.startswith("http"):
-                            offer_data["url"] = href
-
-            # URL de l'entrée (mode vue)
-            view_link = entry.locator("a[href*='rid=']").first()
-            if await view_link.count() > 0:
-                href = await view_link.get_attribute("href") or ""
-                rid = self._extract_rid(href)
-                if rid and not offer_data.get("source_id"):
-                    offer_data["source_id"] = rid
-                if not offer_data.get("url"):
-                    offer_data["url"] = f"{self.base_url}{href}" if href.startswith("/") else href
-
-            if offer_data["title"] or offer_data["description"]:
-                try:
-                    offer = ScrapedOffer(**offer_data)
-                    offers.append(offer)
-                except Exception as exc:
-                    self.logger.warning("Offre invalide entrée %d : %s", i, exc)
-
-        return offers
-
-    async def _parse_generic(self, page) -> list[ScrapedOffer]:
-        """Parsing de dernière chance — scanne toutes les zones de texte."""
-        offers: list[ScrapedOffer] = []
-
-        # Récupérer tout le texte visible
-        body_text = await page.inner_text("body")
-        if not body_text.strip():
-            return offers
-
-        # Tentative : chercher des blocs qui ressemblent à des offres
-        # Chercher des patterns récurrents (ex: séparateurs entre offres)
-        sections = re.split(r'\n{3,}', body_text)
-        for section in sections:
-            section = section.strip()
-            if len(section) < 20:
-                continue
-
-            offer_data = {
-                "source": self.name,
-                "title": "",
-                "description": section[:500],
-                "url": self.seed_url,
-            }
-
-            # Première ligne comme titre probable
-            lines = section.split("\n")
-            if lines and len(lines[0]) < 200:
-                offer_data["title"] = lines[0].strip()
-            else:
-                offer_data["title"] = section[:100].split("\n")[0].strip()
-
-            # Chercher un email
-            email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', section)
-            if email_match:
-                offer_data["contact_email"] = email_match.group(0)
-
-            # Chercher un contact (nom après "Contact :" ou "contact :")
-            contact_match = re.search(
-                r'(?:contact|contact\s*:)\s*([A-Z][a-zéèêëàâîïôûùç]+\s+[A-Z][a-zéèêëàâîïôûùç]+)',
-                section, re.IGNORECASE,
-            )
-            if contact_match:
-                offer_data["contact_name"] = contact_match.group(1)
-
+        for idx, entry_fields in enumerate(entries):
             try:
-                offer = ScrapedOffer(**offer_data)
-                offers.append(offer)
-            except Exception:
-                pass
+                offer = self._fields_to_offer(entry_fields, idx + 1)
+                if offer:
+                    offers.append(offer)
+            except Exception as exc:
+                self.logger.debug("Entrée #%d ignorée: %s", idx + 1, exc)
 
         return offers
 
-    async def _enrich_with_detail_urls(
-        self, page, offers: list[ScrapedOffer]
-    ) -> list[ScrapedOffer]:
-        """Enrichit les offres avec les URLs de détail si manquantes."""
-        if not offers:
-            return offers
+    def _group_fields_into_entries(self, fields: list[dict]) -> list[list[dict]]:
+        """Groupe les champs séquentiels en entrées.
 
-        # Chercher les liens view.php dans la page courante
-        links = page.locator("a[href*='view.php?rid=']")
-        link_count = await links.count()
+        Règle :
+            - data-field-link démarre une nouvelle entrée, le data-field-html suivant lui appartient
+            - data-field-html sans link précédent = entrée à lui seul
+        """
+        entries: list[list[dict]] = []
+        current_entry: list[dict] = []
+        pending_link = False
 
-        if link_count == 0:
-            return offers
+        for field in fields:
+            is_link = "data-field-link" in field["cls"]
+            is_html = "data-field-html" in field["cls"]
 
-        # Construire un mapping rid → url
-        rid_url_map: dict[str, str] = {}
-        for i in range(link_count):
-            href = await links.nth(i).get_attribute("href") or ""
-            rid = self._extract_rid(href)
-            if rid:
-                full_url = f"{self.base_url}{href}" if href.startswith("/") else href
-                rid_url_map[rid] = full_url
+            if is_link:
+                # Nouvelle entrée : sauvegarder la précédente si elle a du contenu
+                if current_entry:
+                    entries.append(current_entry)
+                current_entry = [field]
+                pending_link = True
 
-        # Enrichir
-        for offer in offers:
-            if offer.source_id and offer.source_id in rid_url_map and not offer.url:
-                offer.url = rid_url_map[offer.source_id]
+            elif is_html:
+                if pending_link:
+                    # Ce html appartient à l'entrée du link précédent
+                    current_entry.append(field)
+                    pending_link = False
+                else:
+                    # html seul = nouvelle entrée
+                    if current_entry:
+                        entries.append(current_entry)
+                    current_entry = [field]
 
-        return offers
+        if current_entry:
+            entries.append(current_entry)
+
+        return entries
+
+    def _fields_to_offer(self, entry_fields: list[dict], entry_num: int) -> ScrapedOffer | None:
+        """Convertit une liste de champs en ScrapedOffer.
+
+        Extrait le titre, l'URL, la description, l'entreprise, la localisation,
+        et le type de contrat depuis les champs.
+        """
+        link_field = None
+        html_field = None
+
+        for f in entry_fields:
+            if "data-field-link" in f["cls"]:
+                link_field = f
+            elif "data-field-html" in f["cls"]:
+                html_field = f
+
+        # ── Titre ──
+        title = ""
+        if link_field and link_field["text"]:
+            # Nettoyer le nom de fichier pour en faire un titre
+            title = self._clean_filename_title(link_field["text"])
+        if not title and html_field and html_field["text"]:
+            title = self._extract_title_from_html(html_field["text"])
+
+        if not title or len(title) < 3:
+            return None
+
+        # ── URL ──
+        url = ""
+        if link_field and link_field["href"]:
+            url = link_field["href"]
+        if not url and html_field and html_field["externalUrl"]:
+            url = html_field["externalUrl"]
+        if not url:
+            url = SEED_URL
+
+        # ── Description ──
+        description = ""
+        if html_field and html_field["html"]:
+            description = self._clean_html(html_field["html"])
+        if not description:
+            description = title
+
+        # ── Métadonnées depuis le texte HTML ──
+        text_content = html_field["text"] if html_field else ""
+
+        company = self._extract_company(text_content)
+        location = self._extract_location(text_content)
+        contract_type = self._extract_contract_type(text_content)
+        required_level = self._extract_required_level(text_content)
+
+        return ScrapedOffer(
+            title=title[:500],
+            description=description[:5000],
+            url=url,
+            source=self.name,
+            company=company[:300] if company else "",
+            location=location[:300] if location else "",
+            contract_type=contract_type[:100] if contract_type else "",
+            required_level=required_level[:50] if required_level else "",
+        )
+
+    # ────────────────────────────────────────────────────────────────
+    # Helpers d'extraction
+    # ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _clean_filename_title(filename: str) -> str:
+        """Nettoie un nom de fichier pour en faire un titre lisible."""
+        name = filename.rsplit(".", 1)[0] if "." in filename else filename
+        # Remplacer les underscores par des espaces
+        name = name.replace("_", " ").replace("-", " ").strip()
+        # Supprimer les répétitions d'espaces
+        name = re.sub(r"\s+", " ", name)
+        return name[:200]
+
+    @staticmethod
+    def _extract_title_from_html(text: str) -> str:
+        """Extrait le titre depuis le contenu HTML (premier <strong> ou <h1>)."""
+        if not text:
+            return ""
+        # Prendre la première ligne significative
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        for line in lines[:5]:
+            line = line.replace("\u00a0", " ").strip()
+            if len(line) > 5 and not line.startswith("http"):
+                return line[:200]
+        return text[:200]
+
+    @staticmethod
+    def _clean_html(html: str) -> str:
+        """Nettoie le HTML pour en faire une description textuelle."""
+        text = re.sub(r"<[^>]+>", "\n", html)
+        text = text.replace("&amp;", "&").replace("&nbsp;", " ") \
+                   .replace("&lt;", "<").replace("&gt;", ">")
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()[:5000]
+
+    @staticmethod
+    def _extract_company(text: str) -> str:
+        """Extrait le nom de l'entreprise du texte."""
+        if not text:
+            return ""
+        patterns = [
+            r"Entreprise[:\s]+([A-Z][A-Za-z0-9éèêëàâîïôùûç\s&\-]{2,40})",
+            r"Organisme[:\s]+([A-Z][A-Za-z0-9éèêëàâîïôùûç\s&\-]{2,40})",
+            r"Société[:\s]+([A-Z][A-Za-z0-9éèêëàâîïôùûç\s&\-]{2,40})",
+        ]
+        for pat in patterns:
+            m = re.search(pat, text)
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _extract_location(text: str) -> str:
+        """Extrait la localisation du texte."""
+        if not text:
+            return ""
+        # Chercher le marqueur emoji 📍 ou le texte "Ville :"
+        m = re.search(r"📍.*?Ville\s*:\s*([^\n]+)", text)
+        if m:
+            loc = m.group(1).strip().rstrip(")")
+            loc = re.sub(r"\s*\(\d+[^)]*\)", "", loc)
+            return loc[:200]
+        patterns = [
+            r"Ville[:\s]+([A-Za-zéèêëàâîïôùûç\s\-]+?)(?:\s*[-\n]|\s*$)",
+            r"Lieu[:\s]+([A-Za-zéèêëàâîïôùûç\s\-]+)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, text)
+            if m:
+                loc = m.group(1).strip().rstrip(")")
+                return loc[:200]
+        return ""
+
+    @staticmethod
+    def _extract_contract_type(text: str) -> str:
+        """Extrait le type de contrat."""
+        if not text:
+            return ""
+        m = re.search(
+            r"(Contrat[^)]*|Stage[^)]*|Alternance[^)]*|Apprentissage[^)]*"
+            r"|Professionnalisation[^)]*)",
+            text, re.IGNORECASE,
+        )
+        if m:
+            ct = m.group(0).strip()[:100]
+            if ":" in ct:
+                ct = ct.split(":")[-1].strip()
+            return ct
+        return ""
+
+    @staticmethod
+    def _extract_required_level(text: str) -> str:
+        """Extrait le niveau requis (Bac+3, Bac+5, etc.)."""
+        if not text:
+            return ""
+        m = re.search(r"(Bac[+]?\d*|Master|Licence|Ingénieur|Bachelor|M1|M2|L3)", text)
+        return m.group(1) if m else ""
+
+    # ────────────────────────────────────────────────────────────────
+    # Pagination
+    # ────────────────────────────────────────────────────────────────
 
     async def _go_to_next_page(self, page) -> bool:
-        """Navigue vers la page suivante via la pagination Moodle.
+        """Trouve et navigue vers la page suivante.
 
-        Retourne True si une page suivante a été trouvée et chargée.
+        Fallback: construire l'URL directement (pagination = &page=N).
         """
-        # Chercher le lien "Suivant" ou "Next" ou la page suivante
-        next_link = page.locator(
-            f"{SELECTORS['pagination']}, "
-            "a:has-text('Suivant'), "
-            "a:has-text('Next'), "
-            "a:has-text('►'), "
-            "a:has-text('>')"
-        ).last()
-
-        if await next_link.count() == 0:
-            return False
-
-        # Vérifier que le lien n'est pas désactivé
-        parent = next_link.locator("..")
-        parent_class = await parent.get_attribute("class") or ""
-        if "disabled" in parent_class:
-            return False
-
         try:
-            self.logger.info("Navigation vers la page suivante...")
-            await next_link.click()
-            await page.wait_for_load_state("networkidle")
+            current_url = page.url
+            self.logger.debug("Recherche pagination sur: %s", current_url)
+
+            # Méthode 1: chercher un lien &page= (non headless)
+            next_btn = page.locator("a[href*='&page=']").first
+            if await next_btn.count() > 0:
+                href = await next_btn.get_attribute("href") or ""
+                if href and href != "#":
+                    full_url = href if href.startswith("http") else f"{self.base_url}{href}"
+                    self.logger.info("Page suivante: %s", full_url)
+                    await page.goto(full_url, wait_until="networkidle", timeout=30000)
+                    await page.wait_for_timeout(2000)
+                    return True
+
+            # Méthode 2: construire l'URL directement (headless)
+            # Pattern Moodle: ?d=18&advanced=0&paging&page=N
+            if "?" in current_url:
+                base = current_url.split("?")[0]
+            else:
+                base = current_url
+            # Chercher le paramètre d dans l'URL
+            d_match = __import__("re").search(r'[?&]d=(\d+)', current_url)
+            d_val = d_match.group(1) if d_match else "18"
+            # Chercher le paramètre page courant
+            page_match = __import__("re").search(r'[?&]page=(\d+)', current_url)
+            current_page = int(page_match.group(1)) if page_match else 0
+            next_page = current_page + 1
+            next_url = f"{base}?d={d_val}&advanced=0&paging&page={next_page}"
+            self.logger.info("Page suivante (fallback): %s", next_url)
+            await page.goto(next_url, wait_until="networkidle", timeout=30000)
             await page.wait_for_timeout(2000)
             return True
+
         except Exception as exc:
-            self.logger.warning("Impossible d'aller à la page suivante : %s", exc)
+            self.logger.debug("Erreur pagination: %s", exc)
             return False
 
-    # ── Helpers ──
-
-    def _resolve_field(self, header: str) -> str | None:
-        """Résout un nom de colonne Moodle en nom de champ ScrapedOffer.
-
-        Args:
-            header: Nom de la colonne tel qu'affiché dans Moodle.
-
-        Returns:
-            Nom du champ ScrapedOffer, ou None si non reconnu.
-        """
-        # Nettoyage
-        clean = header.strip().lower().capitalize()
-
-        # Correspondance exacte
-        if clean in self.column_mapping:
-            return self.column_mapping[clean]
-
-        # Correspondance partielle (le header Moodle peut contenir du HTML)
-        for moodle_name, field_name in self.column_mapping.items():
-            if moodle_name.lower() in clean.lower():
-                return field_name
-
-        # Heuristiques supplémentaires
-        lower = header.lower()
-        if any(w in lower for w in ["titre", "intitulé", "poste", "sujet", "title"]):
-            return "title"
-        if any(w in lower for w in ["entreprise", "société", "company", "employeur"]):
-            return "company"
-        if any(w in lower for w in ["lieu", "ville", "localisation", "location"]):
-            return "location"
-        if any(w in lower for w in ["description", "descriptif", "mission"]):
-            return "description"
-        if any(w in lower for w in ["contact", "nom"]):
-            return "contact_name"
-        if any(w in lower for w in ["email", "mail", "courriel"]):
-            return "contact_email"
-        if any(w in lower for w in ["niveau", "bac", "master", "licence"]):
-            return "required_level"
-        if any(w in lower for w in ["domaine", "filière", "spécialité"]):
-            return "domain"
-        if any(w in lower for w in ["contrat", "type"]):
-            return "contract_type"
-        if any(w in lower for w in ["salaire", "rémunération"]):
-            return "salary_raw"
-        if any(w in lower for w in ["url", "lien", "site", "web"]):
-            return "url"
-        if any(w in lower for w in ["date", "publi"]):
-            return "published_date"
-
-        return None
-
-    def _extract_rid(self, href: str) -> str | None:
-        """Extrait l'ID d'enregistrement Moodle (rid) depuis une URL.
-
-        Exemple : '/mod/data/view.php?rid=123' → '123'
-        """
-        if not href:
-            return None
-        match = re.search(r'rid=(\d+)', href)
-        return match.group(1) if match else None
+    # ────────────────────────────────────────────────────────────────
+    # Logging
+    # ────────────────────────────────────────────────────────────────
 
     def _log_examples(self, offers: list[ScrapedOffer]) -> None:
-        """Logge 3 exemples d'offres extraites (debug)."""
         if not offers:
             self.logger.info("Aucune offre à logger.")
             return
-
-        sample = offers[:3]
-        self.logger.info("=== DEBUG : %d exemple(s) d'offre(s) extraite(s) ===", len(sample))
-        for i, offer in enumerate(sample, 1):
+        self.logger.info("=== DEBUG: %d exemple(s) ===", min(3, len(offers)))
+        for i, o in enumerate(offers[:3], 1):
             self.logger.info(
                 "--- Offre #%d ---\n"
-                "  Title       : %s\n"
-                "  Company     : %s\n"
-                "  Location    : %s\n"
-                "  Description : %.200s\n"
-                "  Contact     : %s <%s>\n"
-                "  Level       : %s\n"
-                "  Domain      : %s\n"
-                "  Contract    : %s\n"
-                "  Salary      : %s\n"
+                "  Titre       : %s\n"
+                "  Entreprise  : %s\n"
+                "  Lieu        : %s\n"
                 "  URL         : %s\n"
-                "  Source ID   : %s\n"
-                "  Scraped at  : %s",
-                i,
-                offer.title,
-                offer.company or "(non spécifié)",
-                offer.location or "(non spécifié)",
-                offer.description,
-                offer.contact_name or "(non spécifié)",
-                offer.contact_email or "(non spécifié)",
-                offer.required_level or "(non spécifié)",
-                offer.domain or "(non spécifié)",
-                offer.contract_type or "(non spécifié)",
-                offer.salary_raw or "(non spécifié)",
-                offer.url or "(non spécifié)",
-                offer.source_id or "(non spécifié)",
-                offer.scraped_at,
+                "  Contrat     : %s",
+                i, o.title, o.company or "-", o.location or "-",
+                o.url or "-", o.contract_type or "-",
             )
         self.logger.info("=== FIN DEBUG ===")

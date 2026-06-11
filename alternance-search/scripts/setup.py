@@ -1,4 +1,10 @@
-"""Setup interactif — verifie et installe tous les prerequis."""
+"""Setup interactif — verifie et installe tous les prerequis.
+
+Usage:
+    python -m scripts.setup           # mode interactif (questions O/N)
+    python -m scripts.setup --auto    # mode automatique (tout accepter)
+    python -m scripts.setup --yes     # alias de --auto
+"""
 
 from __future__ import annotations
 
@@ -16,7 +22,12 @@ _TV_DIR = _TV_ROOT / "turbovec-0.8.1" / "turbovec-python"
 
 G, Y, R, C, B, N = "\033[92m", "\033[93m", "\033[91m", "\033[96m", "\033[1m", "\033[0m"
 
+# Flag global pour le mode automatique
+_AUTO = False
+
 def ask(question: str, default: bool = True) -> bool:
+    if _AUTO:
+        return True
     prompt = f"  [{G}O{R}/{R}n{G}]" if default else f"  [{R}o{G}/{G}N{R}]"
     r = input(f"{B}?{N} {question} {prompt} ").strip().lower()
     return r in ("o", "oui", "yes", "y") if default else r in ("", "o", "oui", "yes", "y")
@@ -44,10 +55,22 @@ def _install_rust() -> bool:
         dest = Path(sys.executable).parent / "rustup-init.exe"
         urllib.request.urlretrieve("https://win.rustup.rs/x86_64", dest)
         return subprocess.run([str(dest), "-y"], capture_output=True, text=True).returncode == 0
-    return subprocess.run(
-        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
-        shell=True, capture_output=True, text=True,
-    ).returncode == 0
+    elif sys.platform == "darwin":
+        # macOS : rustup via brew si disponible, sinon curl
+        if shutil.which("brew"):
+            r = subprocess.run(["brew", "install", "rustup"], capture_output=True, text=True)
+            if r.returncode == 0:
+                subprocess.run(["rustup", "default", "stable"], capture_output=True, text=True)
+                return True
+        return subprocess.run(
+            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+            shell=True, capture_output=True, text=True,
+        ).returncode == 0
+    else:  # Linux
+        return subprocess.run(
+            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+            shell=True, capture_output=True, text=True,
+        ).returncode == 0
 
 # ═══════════════════════════════════════════════════════════════════
 
@@ -110,11 +133,33 @@ def check_turbovec(pip: str) -> bool:
 
 def check_browser() -> bool:
     hdr("4. Navigateur Playwright")
-    for path, name in [(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe","Brave"),
-                        (r"C:\Program Files\Google\Chrome\Application\chrome.exe","Chrome")]:
+
+    # Chemins multi-plateforme
+    browser_paths: list[tuple[str, str]] = []
+    if os.name == "nt":
+        browser_paths = [
+            (r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe", "Brave"),
+            (r"C:\Program Files\Google\Chrome\Application\chrome.exe", "Chrome"),
+            (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "Edge"),
+        ]
+    elif sys.platform == "darwin":
+        browser_paths = [
+            ("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", "Brave"),
+            ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "Chrome"),
+        ]
+    else:
+        browser_paths = [
+            ("/usr/bin/brave-browser", "Brave"),
+            ("/usr/bin/google-chrome", "Chrome"),
+            ("/snap/bin/brave", "Brave (snap)"),
+            ("/snap/bin/chromium", "Chromium (snap)"),
+        ]
+
+    for path, name in browser_paths:
         if os.path.exists(path):
             ok(f"{name} detecte")
             return True
+
     wrn("Aucun navigateur Chromium")
     if not ask("Telecharger Chromium Playwright (~150MB) ?"):
         wrn("Scrapers Playwright inoperants")
@@ -144,7 +189,15 @@ def check_db() -> bool:
 # ═══════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    global _AUTO
+    if "--auto" in sys.argv or "--yes" in sys.argv:
+        _AUTO = True
+        sys.argv = [a for a in sys.argv if a not in ("--auto", "--yes")]
+
     print(f"\n{B}{C}   {'='*50}\n   Alternance Search — Setup\n   {'='*50}{N}\n")
+    if _AUTO:
+        print(f"  {C}Mode automatique — toutes les etapes seront executees{N}\n")
+
     if not check_python():
         sys.exit(1)
     pip = _find_pip()
@@ -154,8 +207,9 @@ def main() -> None:
     check_db()
     print(f"\n{B}{'='*50}{N}\n{G}Setup termine !{N}\n")
     print(f"  Scraper : {C}python -m scripts.pipeline --sources all --query \"informatique\"{N}")
-    print(f"  Index   : {C}python -m scripts.index rebuild{N}")
-    print(f"  Search  : {C}python -m scripts.index search \"data science\"{N}\n")
+    print(f"  Index   : {C}python -m scripts.index --build{N}")
+    print(f"  Search  : {C}python -m scripts.search --query \"data science\" --k 20{N}")
+    print(f"  Serveur : {C}python -m uvicorn src.webapp.main:app --reload --port 8000{N}\n")
 
 if __name__ == "__main__":
     main()

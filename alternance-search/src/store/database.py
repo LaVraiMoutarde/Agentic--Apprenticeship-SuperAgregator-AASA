@@ -66,6 +66,8 @@ def get_session() -> Session:
 def init_db() -> None:
     """Crée le dossier data/, le fichier SQLite et toutes les tables.
 
+    Applique aussi les migrations de schéma (nouvelles colonnes).
+
     Idempotent : peut être appelé plusieurs fois sans effet de bord.
     """
     from .models import Base
@@ -79,6 +81,9 @@ def init_db() -> None:
 
     # Créer toutes les tables
     Base.metadata.create_all(engine)
+
+    # Appliquer les migrations (nouvelles colonnes)
+    _apply_migrations(engine)
 
 
 def drop_db() -> None:
@@ -102,3 +107,25 @@ def clear_db() -> int:
         session.query(Offer).delete()
         session.commit()
         return count
+
+
+def _apply_migrations(engine: Engine) -> None:
+    """Applique les migrations de schéma manquantes (colonnes ajoutées)."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if "offers" not in inspector.get_table_names():
+        return  # Table pas encore créée
+
+    existing = {col["name"] for col in inspector.get_columns("offers")}
+
+    migrations: dict[str, str] = {
+        "embedding_score": "ALTER TABLE offers ADD COLUMN embedding_score FLOAT",
+        "llm_details": "ALTER TABLE offers ADD COLUMN llm_details TEXT",
+    }
+
+    with engine.connect() as conn:
+        for col_name, sql in migrations.items():
+            if col_name not in existing:
+                conn.execute(text(sql))
+                conn.commit()

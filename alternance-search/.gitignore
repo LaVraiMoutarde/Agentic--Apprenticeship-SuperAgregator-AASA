@@ -31,3 +31,9 @@ logs/
 # ── Auth (sessions, cookies) ──
 auth/*.json
 !auth/README.md
+
+# ── Donnees utilisateur ──
+data/profile_candidat.md
+data/llm_config.json
+data/click_history.json
+data/favorites.json

@@ -44,6 +44,9 @@
             <!-- SECTION CRITERIA -->
             {% include "partials/_criteria.html" %}
 
+            <!-- SECTION SEMANTIC CRITERIA -->
+            {% include "partials/_semantic_criteria.html" %}
+
             <!-- SECTION PROFILE -->
             {% include "partials/_profile.html" %}
 
@@ -84,6 +87,17 @@
 
     {# ── SCRIPTS BLOCK (filled by child templates) ── #}
     {% block scripts %}{% endblock %}
+
+    {# ── LLM REVIEW MODAL ── #}
+    <div id="review-modal" class="review-modal-overlay" style="display:none;">
+        <div class="review-modal-content">
+            <div class="review-modal-header">
+                <span></span>
+                <button class="review-modal-close" onclick="closeReview()">&times;</button>
+            </div>
+            <div id="review-body" style="max-height:70vh;overflow-y:auto;"></div>
+        </div>
+    </div>
 
 </body>
 </html>

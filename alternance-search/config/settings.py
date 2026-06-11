@@ -99,6 +99,7 @@ class ScorerSettings(BaseSettings):
     temperature: float = 0.0
     max_offers_per_call: int = 20
     timeout_sec: float = 60.0
+    max_llm_candidates: int = 50  # Nombre max d'offres envoyées au LLM (par run)
 
 
 class ExportSettings(BaseSettings):

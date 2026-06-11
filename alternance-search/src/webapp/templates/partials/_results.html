@@ -1,26 +1,51 @@
-<!-- partials/_results.html — table de résultats -->
+<!-- partials/_results.html — table de résultats avec scoring live -->
 <section class="card card-results">
     <h2 class="card-title">
         <i class="fa-solid fa-table-list"></i> Results
         <span class="card-badge" id="results-count">0 offre</span>
-        <span class="card-badge" style="cursor:pointer;font-size:11px;margin-left:auto;" id="btn-sort-toggle" onclick="toggleSort()">
-            <i class="fa-solid fa-arrow-down-wide-short"></i> <span id="sort-label">Score</span>
-        </span>
+        <span class="card-badge" id="results-mode-badge" style="font-size:10px;color:var(--color-text-muted);">—</span>
     </h2>
+    <!-- Controls bar : top-X + sort mode -->
+    <div class="results-controls-bar">
+        <div class="results-control">
+            <label for="results-top-slider" class="results-control-label">
+                Top <strong id="results-top-value">50</strong>
+            </label>
+            <input type="range" id="results-top-slider" min="10" max="200" value="50" step="10"
+                   oninput="onResultsTopChange()" title="Nombre d'offres à afficher">
+        </div>
+        <div class="results-control">
+            <label for="results-sort-mode" class="results-control-label">Trier par</label>
+            <select id="results-sort-mode" class="input input-sm" onchange="loadResults()">
+                <option value="hybride">Score hybride (embedding + LLM)</option>
+                <option value="index">Score embedding (index)</option>
+                <option value="llm">Score LLM</option>
+                <option value="date">Date de scraping</option>
+            </select>
+        </div>
+    </div>
+    <div class="results-actions-bar">
+        <button class="btn btn-sm btn-outline" id="btn-export-favorites" onclick="exportFavorites()" title="Exporter les favoris en Excel">
+            <i class="fa-solid fa-file-excel"></i> Export Favoris
+        </button>
+        <span class="favorites-count" id="favorites-count">0 favoris</span>
+    </div>
     <div class="table-wrapper">
         <table class="table">
             <thead>
                 <tr>
+                    <th style="width:36px;"></th>
                     <th>Title</th>
                     <th>Company</th>
                     <th>Location</th>
                     <th>Score</th>
                     <th>Source</th>
+                    <th style="width:42px;"></th>
                 </tr>
             </thead>
             <tbody id="results-tbody">
                 <tr>
-                    <td colspan="5" class="empty-table">Chargement...</td>
+                    <td colspan="7" class="empty-table">Configurez vos critères et lancez Build Index.</td>
                 </tr>
             </tbody>
         </table>

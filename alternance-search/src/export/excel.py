@@ -166,6 +166,48 @@ class ExcelExporter:
 
         return path.resolve()
 
+    # ── Export des favoris ──
+
+    def export_favorites(
+        self,
+        favorites: list[dict],
+        filename: str = "mes-favoris.xlsx",
+    ) -> Path:
+        """Exporte la liste des favoris en Excel formaté."""
+        if not favorites:
+            raise ValueError("Aucun favori à exporter")
+
+        rows = []
+        for fav in favorites:
+            rows.append({
+                "Titre": fav.get("title", ""),
+                "Entreprise": fav.get("company", ""),
+                "Localisation": fav.get("location", ""),
+                "Source": fav.get("source", ""),
+                "Contrat": fav.get("contract_type", ""),
+                "Niveau": fav.get("required_level", ""),
+                "Score": fav.get("score") or "",
+                "URL": fav.get("url", ""),
+                "Ajouté le": (fav.get("added_at", "")[:10] if fav.get("added_at") else ""),
+                "Description": (fav.get("description") or "")[:300],
+            })
+
+        df = pd.DataFrame(rows)
+        path = self.output_dir / filename
+
+        with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="Favoris", index=False)
+            ws = writer.sheets["Favoris"]
+            widths = {
+                "Titre": 50, "Entreprise": 28, "Localisation": 28,
+                "Source": 16, "Contrat": 16, "Niveau": 12,
+                "Score": 10, "URL": 40, "Ajouté le": 14,
+                "Description": 45,
+            }
+            self._apply_widths(ws, df, widths)
+
+        return path.resolve()
+
     # ── Helpers ──
 
     @staticmethod

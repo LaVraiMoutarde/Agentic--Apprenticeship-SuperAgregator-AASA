@@ -156,6 +156,17 @@ async def system_status():
     manager = _get_scraper_manager()
     scrapers_registered = manager.registered if manager else []
 
+    # Récupérer le profil chat (pour affichage dashboard)
+    try:
+        from src.webapp.routes.profile import get_chat_profile, get_chat_profile_dict
+        _chat_md = get_chat_profile()
+        chat_profile = {
+            "profile_md": _chat_md,
+            "has_content": bool(_chat_md and _chat_md.strip()),
+        }
+    except ImportError:
+        chat_profile = {"profile_md": "", "has_content": False}
+
     return {
         "total_offers": total,
         "offers_scraped_today": today_count,
@@ -165,6 +176,7 @@ async def system_status():
         "jobs": jobs[:10],
         "criteria": _criteria.to_dict(),
         "profile": _profile,
+        "chat_profile": chat_profile,
     }
 
 
@@ -181,6 +193,12 @@ async def trigger_scrape():
 
     job_id = create_job("scrape")
     update_job(job_id, status="pending", log_line="Scraping job created")
+
+    # Vérifier qu'on a des termes de recherche
+    queries = _criteria.active_queries
+    if not queries:
+        update_job(job_id, status="failed", log_line="Aucun terme de recherche. Configurez des critères d'abord.")
+        return {"job_id": job_id, "status": "no_terms"}
 
     # Lancement en background
     def _run():
@@ -216,16 +234,6 @@ async def trigger_scrape():
                 except Exception as e:
                     update_job(job_id, log_line=f"Store warning: {e}")
 
-            # Auto-indexation : mise à jour de l'index sémantique
-            try:
-                pipe = _get_semantic_pipeline()
-                if pipe is not None:
-                    update_job(job_id, log_line="Mise à jour de l'index sémantique...")
-                    result = pipe.embed_and_index_all()
-                    update_job(job_id, log_line=f"Index : {result['indexed']} offres encodées ({result['elapsed_ms']:.0f}ms)")
-            except Exception as e:
-                update_job(job_id, log_line=f"Indexation ignorée : {e}")
-
             update_job(
                 job_id,
                 status="done",
@@ -242,69 +250,111 @@ async def trigger_scrape():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Helpers — extraction from Markdown profile
+# ═══════════════════════════════════════════════════════════════════════
+
+import re as _re
+
+def _extract_md_field(md: str, field: str) -> str:
+    """Extrait la valeur d'un champ Markdown (ex: '## Poste recherché')."""
+    pattern = rf'##\s+{_re.escape(field)}\s*\n(.*?)(?:\n##|\n#|\Z)'
+    match = _re.search(pattern, md, _re.DOTALL)
+    if match:
+        value = match.group(1).strip()
+        if value.startswith('- '):
+            value = value[2:].strip()
+        return value
+    return ""
+
+def _extract_md_list(md: str, field: str) -> list[str]:
+    """Extrait une liste à puces d'un champ Markdown."""
+    pattern = rf'##\s+{_re.escape(field)}\s*\n(.*?)(?:\n##|\n#|\Z)'
+    match = _re.search(pattern, md, _re.DOTALL)
+    if not match:
+        return []
+    block = match.group(1)
+    items = _re.findall(r'-\s+(.+)', block)
+    return [item.strip() for item in items if item.strip()]
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # POST /api/llm/run
 # ═══════════════════════════════════════════════════════════════════════
 
 @router.post("/llm/run")
-async def trigger_llm_scoring():
-    """Lance le scoring LLM sur les offres existantes en utilisant le profil du chat builder.
+async def trigger_llm_scoring(payload: dict = {}):
+    """Lance le scoring LLM sur les offres existantes en utilisant le profil Markdown du chat builder.
 
-    Si aucun profil n'a été construit via le chat, utilise le profil legacy (_profile).
+    Body optionnel : {"max_candidates": 50} (10-200, défaut: settings.scorer.max_llm_candidates)
     """
-    # Récupérer le profil depuis le chat builder (import lazy pour éviter circ)
     from src.webapp.routes.profile import get_chat_profile
 
-    chat_profile = get_chat_profile()
+    profile_md = get_chat_profile()  # Markdown string
 
-    # Fallback : profil legacy si le chat n'a rien produit
-    profile_source = chat_profile if chat_profile and any(
-        v for v in chat_profile.values() if v
-    ) else _profile
+    if not profile_md or not profile_md.strip():
+        raise HTTPException(
+            400,
+            "Aucun profil candidat détecté. "
+            "Construisez d'abord votre profil via le chat Candidate Profile, "
+            "ou écrivez-le directement dans l'éditeur Markdown."
+        )
 
-    if not profile_source:
-        raise HTTPException(400, "Configurez d'abord un profil candidat via le chat (ou le profil legacy).")
+    # Récupérer max_candidates depuis le payload (clampé 10-200)
+    from config import settings
+    _raw_max = payload.get("max_candidates", settings.scorer.max_llm_candidates)
+    try:
+        max_candidates = max(10, min(200, int(_raw_max)))
+    except (TypeError, ValueError):
+        max_candidates = settings.scorer.max_llm_candidates
 
     job_id = create_job("llm")
 
     def _run():
-        update_job(job_id, status="running", log_line="Starting LLM scoring...")
+        update_job(job_id, status="running", log_line=f"Starting LLM scoring...")
+        update_job(job_id, log_line=f"Max candidates: {max_candidates}")
         try:
             from src.scoring.llm_scorer import LLMScorer, CandidateProfile
             from src.store.repository import OfferRepository
 
             update_job(job_id, log_line="Chargement du profil...")
 
-            # Mapper le profil JSON (chat builder) vers CandidateProfile
+            # Construire un CandidateProfile à partir du markdown (pour le scoring LLM uniquement)
             profile = CandidateProfile(
-                current_level=profile_source.get("education_level", ""),
-                target_level=profile_source.get("education_level", ""),
-                domain=profile_source.get("desired_role", ""),
-                skills=profile_source.get("skills", []),
-                languages=profile_source.get("languages", []),
-                preferred_locations=(
-                    [profile_source["preferred_location"]]
-                    if profile_source.get("preferred_location")
-                    else []
-                ),
-                preferred_contract=profile_source.get("preferred_contract", ""),
-                project=(
-                    profile_source.get("summary", "")
-                    or profile_source.get("project", "")
-                ),
+                current_level=_extract_md_field(profile_md, "Niveau d'études") or _extract_md_field(profile_md, "Niveau d'etudes"),
+                target_level=_extract_md_field(profile_md, "Niveau d'études") or _extract_md_field(profile_md, "Niveau d'etudes"),
+                domain=_extract_md_field(profile_md, "Poste recherché") or _extract_md_field(profile_md, "Poste recherche"),
+                skills=_extract_md_list(profile_md, "Compétences techniques") or _extract_md_list(profile_md, "Competences techniques"),
+                languages=_extract_md_list(profile_md, "Langues"),
+                preferred_locations=[_extract_md_field(profile_md, "Localisation souhaitée") or _extract_md_field(profile_md, "Localisation souhaitee")],
+                preferred_contract=_extract_md_field(profile_md, "Contrat"),
+                project=_extract_md_field(profile_md, "Résumé") or _extract_md_field(profile_md, "Resume") or profile_md[:500],
             )
 
-            # Étape 1 : Pré-filtrage sémantique (si l'index est dispo)
+            # Étape 1 : Pré-filtrage sémantique HYBRIDE (embedding + boost mots-clés)
             pipe = _get_semantic_pipeline()
             repo = OfferRepository()
             total_in_db = repo.count_all()
 
             if pipe is not None and pipe.index_size > 0:
-                update_job(job_id, log_line=f"Index trouvé ({pipe.index_size} offres), pré-filtrage sémantique...")
-                offers = pipe.search_by_profile_dict(profile_source, top_k=200)
-                update_job(job_id, log_line=f"Pré-filtrage : {len(offers)} offres candidates (sur {total_in_db} en base)")
+                sc = _get_semantic_criteria()
+                if sc.has_criteria:
+                    # top_k pour search_hybrid : 2× max_candidates (max 500)
+                    search_k = min(max_candidates * 2, 500)
+                    update_job(job_id, log_line=f"Index trouvé ({pipe.index_size} offres), pré-filtrage hybride (top {search_k})...")
+                    update_job(job_id, log_line=f"Query: {sc.to_query_text()}")
+                    if sc.boost_keywords:
+                        update_job(job_id, log_line=f"Boost mots-clés ({sc.boost_weight}): {', '.join(sc.boost_keywords)}")
+
+                    hybrid_results = pipe.search_hybrid(sc, top_k=search_k)
+                    offers = [offer for offer, final, base, matched in hybrid_results[:max_candidates]]
+                    update_job(job_id, log_line=f"Pré-filtrage hybride : {len(offers)} offres candidates (sur {total_in_db} en base)")
+                else:
+                    update_job(job_id, log_line="Critères sémantiques vides, fallback sur recherche 'alternance'...")
+                    offers = pipe.search_prefilter("alternance", top_k=max_candidates)
+                    update_job(job_id, log_line=f"Pré-filtrage fallback : {len(offers)} offres candidates (sur {total_in_db} en base)")
             else:
-                update_job(job_id, log_line="Pas d'index sémantique, scoring sur les 50 plus récentes...")
-                offers = repo.find(limit=50)
+                update_job(job_id, log_line=f"Pas d'index sémantique, scoring sur les {max_candidates} plus récentes...")
+                offers = repo.find(limit=max_candidates)
 
             if not offers:
                 update_job(job_id, status="done", result={"scored": 0, "total_in_db": total_in_db},
@@ -325,8 +375,9 @@ async def trigger_llm_scoring():
             scored_results = scorer.score_offers_batch(profile, search_results)
             scored_count = len([r for r in scored_results if r is not None])
 
-            # Persister les scores en base
+            # Persister les scores en base (score + détails complets)
             try:
+                repo = OfferRepository()
                 saved = 0
                 for sr in scored_results:
                     if sr is None:
@@ -334,14 +385,14 @@ async def trigger_llm_scoring():
                     offer_id = sr.search_result.offer.id
                     score_val = sr.llm_score.global_score  # /100
                     if score_val and score_val > 0:
-                        with get_session() as sess:
-                            sess.query(Offer).filter(Offer.id == offer_id).update(
-                                {"llm_score": score_val / 100.0}
-                            )
-                            sess.commit()
+                        repo.update_llm_details(
+                            offer_id,
+                            score_val / 100.0,
+                            sr.llm_score.to_dict(),
+                        )
                         saved += 1
                 if saved:
-                    update_job(job_id, log_line=f"{saved} scores sauvegardés en base")
+                    update_job(job_id, log_line=f"{saved} scores + détails sauvegardés en base")
             except Exception as e:
                 update_job(job_id, log_line=f"Sauvegarde scores ignorée : {e}")
 
@@ -357,6 +408,82 @@ async def trigger_llm_scoring():
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id, "status": "started"}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# POST /api/llm/review/{offer_id}  —  analyse LLM d'une offre unique
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.post("/llm/review/{offer_id}")
+async def review_single_offer(offer_id: int):
+    """Analyse une offre unique avec le LLM, en comparant au profil candidat.
+
+    Si l'offre a déjà été scorée, retourne les détails en cache (base).
+    Sinon, appelle le LLM pour une analyse focalisée sur une seule offre.
+    """
+    from src.webapp.routes.profile import get_chat_profile
+    from src.scoring.llm_scorer import LLMScorer, CandidateProfile
+    from src.store.repository import OfferRepository
+
+    repo = OfferRepository()
+
+    # 1. Vérifier le cache en base
+    cached = repo.get_llm_details(offer_id)
+    if cached:
+        return {"offer_id": offer_id, "cached": True, "review": cached}
+
+    # 2. Charger l'offre
+    offer = repo.get_by_id(offer_id)
+    if offer is None:
+        raise HTTPException(404, f"Offre {offer_id} introuvable.")
+
+    # 3. Charger le profil candidat
+    profile_md = get_chat_profile()
+    if not profile_md or not profile_md.strip():
+        raise HTTPException(400, "Aucun profil candidat. Construisez-le d'abord via le chat.")
+
+    profile = CandidateProfile(
+        current_level=_extract_md_field(profile_md, "Niveau d'études") or _extract_md_field(profile_md, "Niveau d'etudes"),
+        target_level=_extract_md_field(profile_md, "Niveau d'études") or _extract_md_field(profile_md, "Niveau d'etudes"),
+        domain=_extract_md_field(profile_md, "Poste recherché") or _extract_md_field(profile_md, "Poste recherche"),
+        skills=_extract_md_list(profile_md, "Compétences techniques") or _extract_md_list(profile_md, "Competences techniques"),
+        languages=_extract_md_list(profile_md, "Langues"),
+        preferred_locations=[_extract_md_field(profile_md, "Localisation souhaitée") or _extract_md_field(profile_md, "Localisation souhaitee")],
+        preferred_contract=_extract_md_field(profile_md, "Contrat"),
+        project=_extract_md_field(profile_md, "Résumé") or _extract_md_field(profile_md, "Resume") or profile_md[:500],
+    )
+
+    # 4. Récupérer le texte complet de la page web (pour une analyse plus riche)
+    from src.scraper.page_fetcher import fetch_job_page_text
+    import logging
+
+    page_fetched = False
+    full_page_text = None
+    if offer.url:
+        try:
+            logging.info("Fetching full page for offer %d: %s", offer_id, offer.url[:80])
+            full_page_text = fetch_job_page_text(offer.url)
+            if full_page_text:
+                page_fetched = True
+                logging.info("Page fetched successfully: %d chars", len(full_page_text))
+        except Exception:
+            logging.warning("Failed to fetch page for offer %d", offer_id)
+
+    # 5. Appeler le LLM pour une analyse focalisée (1 offre)
+    scorer = LLMScorer()
+    result = scorer.score_offer_with_llm(profile, offer, full_page_text=full_page_text)
+
+    # 6. Sauvegarder en base (cache)
+    score_val = result.global_score
+    if score_val and score_val > 0:
+        repo.update_llm_details(offer_id, score_val / 100.0, result.to_dict())
+
+    return {
+        "offer_id": offer_id,
+        "cached": False,
+        "page_fetched": page_fetched,
+        "review": result.to_dict(),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -463,6 +590,71 @@ async def reset_criteria():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# SEMANTIC CRITERIA endpoints (pré-filtrage embedding + boost mots-clés)
+# ═══════════════════════════════════════════════════════════════════════
+
+_semantic_criteria = None
+
+
+def _get_semantic_criteria():
+    """Retourne les SemanticCriteria (singleton, chargé depuis le disque)."""
+    global _semantic_criteria
+    if _semantic_criteria is None:
+        from src.scoring.semantic_criteria import SemanticCriteria
+        _semantic_criteria = SemanticCriteria.load()
+    return _semantic_criteria
+
+
+class SemanticCriteriaPayload(BaseModel):
+    desired_role: str = ""
+    skills: str = ""
+    boost_keywords: list[str] = []
+    boost_weight: str = "modéré"
+
+
+@router.get("/semantic-criteria")
+async def get_semantic_criteria():
+    """Retourne les critères sémantiques actuels."""
+    sc = _get_semantic_criteria()
+    return sc.to_dict()
+
+
+@router.post("/semantic-criteria/save")
+async def save_semantic_criteria(payload: SemanticCriteriaPayload):
+    """Enregistre les critères sémantiques."""
+    global _semantic_criteria
+    from src.scoring.semantic_criteria import SemanticCriteria
+    _semantic_criteria = SemanticCriteria(
+        desired_role=payload.desired_role,
+        skills=payload.skills,
+        boost_keywords=payload.boost_keywords,
+        boost_weight=payload.boost_weight,
+    )
+    _semantic_criteria.save()
+    return _semantic_criteria.to_dict()
+
+
+@router.delete("/semantic-criteria/reset")
+async def reset_semantic_criteria():
+    """Réinitialise les critères sémantiques."""
+    global _semantic_criteria
+    from src.scoring.semantic_criteria import SemanticCriteria
+    _semantic_criteria = SemanticCriteria()
+    _semantic_criteria.save()
+    return _semantic_criteria.to_dict()
+
+
+@router.delete("/semantic-criteria/reset")
+async def reset_semantic_criteria():
+    """Réinitialise les critères sémantiques."""
+    global _semantic_criteria
+    from src.scoring.semantic_criteria import SemanticCriteria
+    _semantic_criteria = SemanticCriteria()
+    _semantic_criteria.save()
+    return _semantic_criteria.to_dict()
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # GET/POST /api/profile (legacy — pour compatibilité temporaire)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -479,6 +671,8 @@ async def set_profile(payload: ProfilePayload):
 # ═══════════════════════════════════════════════════════════════════════
 
 def _offer_dict(o) -> dict:
+    # Score hybride : LLM > embedding > rien (ne pas montrer data_quality comme pertinence)
+    score = o.llm_score or o.embedding_score
     return {
         "id": o.id,
         "title": o.title or "",
@@ -493,28 +687,144 @@ def _offer_dict(o) -> dict:
         "domain": o.domain or "",
         "description": (o.description or "")[:500],
         "scraped_date": o.scraped_date or "",
-        "score": o.llm_score or o.data_quality_score or 0,
+        "score": score,
+        "score_type": "llm" if o.llm_score is not None else ("embedding" if o.embedding_score is not None else None),
+        "has_review": o.llm_details is not None,
+        "data_quality": o.data_quality_score,
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# GET /api/results
+# GET /api/results  —  scoring live via search_hybrid() sur toute la DB
 # ═══════════════════════════════════════════════════════════════════════
 
 @router.get("/results")
 async def get_results(
-    limit: int = Query(50, ge=1, le=500),
-    sort: str = "score",
+    top: int = Query(50, ge=10, le=500),
+    sort_mode: str = Query("hybride", pattern="^(index|llm|hybride|date)$"),
 ):
-    """Retourne les offres depuis la base, triées par score LLM ou par date."""
+    """Retourne le top-X des offres scorées en direct avec les critères actuels.
+
+    Modes de tri :
+    - index   : embedding_score pur (similarité cosinus)
+    - llm     : llm_score pur (score LLM stocké en base)
+    - hybride : 0.6×index + 0.4×llm (comme HybridRanker)
+    - date    : par date de scraping décroissante
+    """
     try:
         init_db()
         repo = OfferRepository()
-        order_by_score = sort == "score"
-        offer_list = repo.find(limit=limit, order_by_score=order_by_score)
-        return [_offer_dict(o) for o in offer_list]
+
+        # Vérifier que l'index est prêt
+        pipe = _get_semantic_pipeline()
+        if pipe is None or pipe.index_size == 0:
+            # Fallback : pas d'index, on retourne par date
+            offers = repo.find(limit=top, order_by_score=False)
+            return {
+                "results": [_offer_dict(o) for o in offers],
+                "total": repo.count_all(),
+                "mode": "date",
+                "warning": "Index non construit. Lancez 'Build Index' pour activer le scoring sémantique.",
+            }
+
+        # Critères sémantiques
+        sc = _get_semantic_criteria()
+        pipe.init()
+
+        if sort_mode == "date":
+            # Mode date : pas de scoring, retour direct
+            offers = repo.find(limit=top, order_by_score=False)
+            return {
+                "results": [_offer_dict(o) for o in offers],
+                "total": repo.count_all(),
+                "mode": "date",
+                "criteria": sc.to_dict() if sc.has_criteria else None,
+            }
+
+        # Modes avec scoring : index / llm / hybride
+        # search_hybrid retourne (offer, final_score, base_score, matched_kw)
+        if sc.has_criteria:
+            hybrid_results = pipe.search_hybrid(sc, top_k=min(top * 2, 500))
+        else:
+            hybrid_results = []
+            # Fallback sans critères : utiliser les embedding_score stockés
+            offers = repo.find(limit=min(top * 3, 500), order_by_score=True)
+            query_vec = pipe._embedder.embed_query("alternance")[0] if pipe._embedder else None
+            for o in offers:
+                if o.embedding_score is not None:
+                    hybrid_results.append((o, o.embedding_score, o.embedding_score, 0))
+
+        # Appliquer le mode de tri
+        results = _rank_results(hybrid_results, sort_mode, top)
+
+        return {
+            "results": results,
+            "total_candidates": len(hybrid_results),
+            "total_db": repo.count_all(),
+            "mode": sort_mode,
+            "criteria": sc.to_dict() if sc.has_criteria else None,
+            "query": sc.to_query_text() if sc.has_criteria else "alternance",
+        }
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+def _rank_results(
+    hybrid_results: list,
+    sort_mode: str,
+    top: int,
+) -> list[dict]:
+    """Trie et formate les résultats selon le mode choisi.
+
+    hybrid_results : [(offer, final_score, base_score, matched_kw), ...]
+    """
+    scored: list[dict] = []
+    for offer, final, base, matched in hybrid_results:
+        llm = offer.llm_score or 0.0
+        scored.append({
+            "offer": offer,
+            "embedding_score": round(float(base), 4),
+            "llm_score": round(float(llm), 4),
+            "final_score": round(float(final), 4),
+            "matched_keywords": matched,
+        })
+
+    if sort_mode == "index":
+        scored.sort(key=lambda x: x["embedding_score"], reverse=True)
+    elif sort_mode == "llm":
+        scored.sort(key=lambda x: x["llm_score"], reverse=True)
+    elif sort_mode == "hybride":
+        # Hybride : 0.6×embedding + 0.4×llm
+        for s in scored:
+            s["hybrid_score"] = 0.6 * s["embedding_score"] + 0.4 * s["llm_score"]
+        scored.sort(key=lambda x: x["hybrid_score"], reverse=True)
+
+    top_results = scored[:top]
+    return [
+        {
+            "id": s["offer"].id,
+            "title": s["offer"].title or "",
+            "company": s["offer"].company or "",
+            "location": s["offer"].location or "",
+            "region": s["offer"].region or "",
+            "source": s["offer"].source or "",
+            "source_id": s["offer"].source_id or "",
+            "url": s["offer"].url or "",
+            "contract_type": s["offer"].contract_type or "",
+            "required_level": s["offer"].required_level or "",
+            "domain": s["offer"].domain or "",
+            "description": (s["offer"].description or "")[:500],
+            "scraped_date": s["offer"].scraped_date or "",
+            "embedding_score": s["embedding_score"],
+            "llm_score": s["llm_score"],
+            "final_score": s["final_score"],
+            "hybrid_score": s.get("hybrid_score", s["final_score"]),
+            "matched_keywords": s["matched_keywords"],
+            "has_review": s["offer"].llm_details is not None,
+            "score_type": "llm" if s["offer"].llm_score is not None and s["offer"].llm_score > 0 else "embedding",
+        }
+        for s in top_results
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -577,6 +887,95 @@ async def export_excel():
             filename="export_dashboard.xlsx",
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# FAVORITES endpoints
+# ═══════════════════════════════════════════════════════════════════════
+
+_favorites_store = None
+
+
+def _get_favorites_store():
+    """Retourne le FavoritesStore (singleton)."""
+    global _favorites_store
+    if _favorites_store is None:
+        from src.store.favorites import get_favorites_store
+        _favorites_store = get_favorites_store()
+    return _favorites_store
+
+
+@router.post("/favorites/toggle")
+async def toggle_favorite(payload: dict):
+    """Ajoute ou retire une offre des favoris."""
+    try:
+        store = _get_favorites_store()
+        result = store.toggle(payload)
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/favorites")
+async def list_favorites():
+    """Retourne la liste de tous les favoris."""
+    try:
+        store = _get_favorites_store()
+        return {
+            "favorites": store.get_all(),
+            "count": store.count(),
+            "ids": list(store.get_favorite_ids()),
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/favorites/check/{offer_id}")
+async def check_favorite(offer_id: int):
+    """Vérifie si une offre est dans les favoris."""
+    try:
+        store = _get_favorites_store()
+        return {"favorite": store.is_favorite(offer_id)}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/favorites/export")
+async def export_favorites_excel():
+    """Génère et retourne un fichier Excel des favoris."""
+    try:
+        from src.export.excel import ExcelExporter
+
+        store = _get_favorites_store()
+        favorites = store.get_all()
+
+        if not favorites:
+            raise HTTPException(400, "Aucun favori à exporter. Ajoutez d'abord des offres aux favoris.")
+
+        exporter = ExcelExporter()
+        filepath = exporter.export_favorites(favorites, "mes-favoris.xlsx")
+
+        return FileResponse(
+            path=str(filepath),
+            filename="mes-favoris.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.delete("/favorites/clear")
+async def clear_favorites():
+    """Supprime tous les favoris."""
+    try:
+        store = _get_favorites_store()
+        count = store.count()
+        store.clear()
+        return {"status": "ok", "cleared": count}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -675,6 +1074,13 @@ async def set_llm_config(payload: LLMConfigPayload):
         settings.scorer.base_url = payload.base_url or settings.scorer.base_url
     except Exception:
         pass  # settings peut ne pas exister dans certains contextes
+
+    # Recharger le ProfileBuilder pour qu'il utilise la nouvelle config
+    try:
+        from src.scoring.profile_builder import ProfileBuilder
+        # Le builder sera recree au prochain appel generate-terms
+    except ImportError:
+        pass
 
     return {"status": "saved", "provider": payload.provider}
 
